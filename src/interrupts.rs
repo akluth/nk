@@ -1,9 +1,8 @@
 use core::arch::global_asm;
 
-use crate::{arch, scheduler, serial};
+use crate::{arch, gdt, scheduler, serial};
 
 const IDT_ENTRIES: usize = 256;
-const KERNEL_CODE_SELECTOR: u16 = 0x28;
 const TIMER_VECTOR: u8 = 32;
 const SYSCALL_VECTOR: u8 = 0x80;
 
@@ -53,7 +52,7 @@ impl IdtEntry {
         let address = handler as usize as u64;
         Self {
             offset_low: address as u16,
-            selector: KERNEL_CODE_SELECTOR,
+            selector: gdt::KERNEL_CODE_SELECTOR,
             options,
             offset_mid: (address >> 16) as u16,
             offset_high: (address >> 32) as u32,

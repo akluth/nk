@@ -4,9 +4,11 @@
 mod arch;
 mod desktop;
 mod framebuffer;
+mod gdt;
 mod ipc;
 mod interrupts;
 mod limine;
+mod memory;
 mod pci;
 mod serial;
 mod scheduler;
@@ -23,7 +25,7 @@ pub extern "C" fn _start() -> ! {
 }
 
 mod microkernel {
-    use crate::{arch, interrupts, ipc, limine, scheduler, serial, services, userland, virtio};
+    use crate::{arch, gdt, interrupts, ipc, limine, memory, scheduler, serial, services, userland, virtio};
 
     pub struct Kernel {
         scheduler: scheduler::Scheduler,
@@ -41,6 +43,7 @@ mod microkernel {
         pub fn run(mut self) -> ! {
             serial::init();
             serial::write_line("nk: kernel entered");
+            gdt::init();
             self.scheduler.spawn("desktop");
             self.scheduler.spawn("idle");
             scheduler::install(self.scheduler);
@@ -56,6 +59,9 @@ mod microkernel {
             interrupts::init();
             serial::write_line("nk: interrupts enabled");
             userland::init();
+            if let Some(root) = memory::create_user_address_space() {
+                userland::install_page_table_root(root);
+            }
             userland::smoke_test_syscall();
             virtio::init();
 

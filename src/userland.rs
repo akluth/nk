@@ -1,6 +1,6 @@
-use core::arch::asm;
+use core::{arch::asm, cell::UnsafeCell};
 
-use crate::serial;
+use crate::{gdt, memory::PageTableRoot, serial};
 
 pub type VirtAddr = u64;
 pub type PhysAddr = u64;
@@ -42,12 +42,14 @@ impl MappingFlags {
 
 pub struct AddressSpace {
     mappings: [Option<Mapping>; 16],
+    root: Option<PageTableRoot>,
 }
 
 impl AddressSpace {
     pub const fn new() -> Self {
         Self {
             mappings: [None; 16],
+            root: None,
         }
     }
 
@@ -74,12 +76,27 @@ impl AddressSpace {
             }
         }
 
+        if let Some(root) = self.root {
+            token ^= root.pml4_phys();
+        }
+
         token
+    }
+
+    pub fn install_root(&mut self, root: PageTableRoot) {
+        self.root = Some(root);
     }
 }
 
+struct GlobalAddressSpace(UnsafeCell<AddressSpace>);
+
+unsafe impl Sync for GlobalAddressSpace {}
+
+static USER_ADDRESS_SPACE: GlobalAddressSpace =
+    GlobalAddressSpace(UnsafeCell::new(AddressSpace::new()));
+
 pub fn init() {
-    let mut address_space = AddressSpace::new();
+    let address_space = unsafe { &mut *USER_ADDRESS_SPACE.0.get() };
     let mapped = address_space.map(Mapping {
         virt: 0x0000_4000_0000,
         phys: 0,
@@ -93,6 +110,15 @@ pub fn init() {
     if mapped && address_space.validation_token() != 0 {
         serial::write_line("nk: user address-space model ready");
     }
+}
+
+pub fn install_page_table_root(root: PageTableRoot) {
+    unsafe {
+        (*USER_ADDRESS_SPACE.0.get()).install_root(root);
+    }
+    let (user_code, user_data) = gdt::user_selectors();
+    let _ = (user_code, user_data);
+    serial::write_line("nk: user page-table root installed");
 }
 
 pub fn smoke_test_syscall() {

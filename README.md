@@ -11,8 +11,10 @@
 - `src/limine.rs`: Limine-Framebuffer-Request.
 - `src/framebuffer.rs`: Pixel- und Rechteck-Zeichenroutinen.
 - `src/services.rs` und `src/desktop.rs`: erste GUI-Service-Huelle und Desktopansicht.
-- `src/pci.rs` und `src/virtio.rs`: PCI-Scan und erste Virtio-Geraeteerkennung.
-- `src/userland.rs`: Adressraum-Modell und erster Syscall-Smoke-Test.
+- `src/gdt.rs`: GDT, Kernel/User-Segmente, TSS und erste IST/Kern-Stacks.
+- `src/memory.rs`: Page-Table-Erzeugung fuer einen isolierbaren Userland-Adressraum.
+- `src/pci.rs` und `src/virtio.rs`: PCI-Scan, Virtio-Capabilities und erste Queue-Speicher.
+- `src/userland.rs`: Adressraum-Modell, Page-Table-Root und erster Syscall-Smoke-Test.
 
 ## Tools installieren
 
@@ -79,7 +81,7 @@ $disk = "$PWD\build\virtio-test.img"
 
 ## Naechste sinnvolle Schritte
 
-- Page-Table-Erzeugung fuer echte isolierte Userland-Adressraeume implementieren.
-- Ring-3-Task-Start mit TSS/IST und getrennten User-Stacks ergaenzen.
-- Virtio-Queues fuer Block- und Eingabegeraete initialisieren.
-- GUI-Service aus der Kernel-Huelle in einen isolierten Userland-Task verschieben.
+- CR3-Wechsel auf den Userland-Page-Table-Root und echte Ring-3-Ausfuehrung per `iretq`.
+- Userland-Stacks und Trap-Frames als Scheduler-Kontext modellieren.
+- Virtio-Queues in den Geraeten registrieren und erste Block/Input-Requests ausfuehren.
+- GUI-Service aus der Kernel-Huelle in einen echten isolierten Userland-Task verschieben.

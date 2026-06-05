@@ -15,6 +15,19 @@ pub struct Device {
     pub subclass: u8,
 }
 
+#[derive(Clone, Copy)]
+pub struct Bar {
+    pub raw: u32,
+    pub base: u64,
+    pub is_io: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct Capability {
+    pub id: u8,
+    pub offset: u8,
+}
+
 pub trait Visitor {
     fn visit(&mut self, device: Device);
 }
@@ -61,7 +74,48 @@ fn read_u16(bus: u8, slot: u8, function: u8, offset: u8) -> u16 {
     (value >> ((offset & 0x02) * 8)) as u16
 }
 
-fn read_u32(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {
+pub fn read_bar(device: Device, index: u8) -> Bar {
+    let raw = read_u32(device.bus, device.slot, device.function, 0x10 + index * 4);
+    let is_io = raw & 1 != 0;
+    let base = if is_io {
+        (raw & !0x3) as u64
+    } else {
+        (raw & !0xf) as u64
+    };
+
+    Bar { raw, base, is_io }
+}
+
+pub fn read_cap_u8(device: Device, offset: u8, field: u8) -> u8 {
+    read_u8(device.bus, device.slot, device.function, offset.wrapping_add(field))
+}
+
+pub fn read_cap_u32(device: Device, offset: u8, field: u8) -> u32 {
+    read_u32(
+        device.bus,
+        device.slot,
+        device.function,
+        offset.wrapping_add(field) & !0x03,
+    )
+}
+
+pub fn visit_capabilities<V: FnMut(Capability)>(device: Device, mut visitor: V) {
+    let status = read_u16(device.bus, device.slot, device.function, 0x06);
+    if status & (1 << 4) == 0 {
+        return;
+    }
+
+    let mut offset = read_u8(device.bus, device.slot, device.function, 0x34) & !0x03;
+    let mut guard = 0;
+    while offset >= 0x40 && guard < 48 {
+        let id = read_u8(device.bus, device.slot, device.function, offset);
+        visitor(Capability { id, offset });
+        offset = read_u8(device.bus, device.slot, device.function, offset + 1) & !0x03;
+        guard += 1;
+    }
+}
+
+pub fn read_u32(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {
     let address = 0x8000_0000
         | ((bus as u32) << 16)
         | ((slot as u32) << 11)
