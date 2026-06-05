@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 
-const USER_TASKS: usize = 2;
+const USER_TASKS: usize = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -84,10 +84,17 @@ struct UserScheduler {
     installed: usize,
 }
 
+pub struct UserTaskSnapshot {
+    pub name: &'static str,
+    pub ticks: u64,
+    pub active: bool,
+    pub current: bool,
+}
+
 impl UserScheduler {
     const fn new() -> Self {
         Self {
-            tasks: [UserTask::empty(), UserTask::empty()],
+            tasks: [UserTask::empty(); USER_TASKS],
             current: 0,
             installed: 0,
         }
@@ -131,6 +138,24 @@ impl UserScheduler {
         } else {
             Some(self.tasks[0].frame)
         }
+    }
+
+    fn task_count(&self) -> usize {
+        self.installed
+    }
+
+    fn task_info(&self, index: usize) -> Option<UserTaskSnapshot> {
+        if index >= self.installed {
+            return None;
+        }
+
+        let task = self.tasks[index];
+        Some(UserTaskSnapshot {
+            name: task.name,
+            ticks: task.ticks,
+            active: task.active,
+            current: index == self.current,
+        })
     }
 }
 
@@ -204,4 +229,12 @@ pub fn first_user_frame() -> Option<TrapFrame> {
 
 pub fn schedule_user(frame: &mut TrapFrame) -> Option<&'static str> {
     unsafe { (*USER_SCHEDULER.0.get()).schedule(frame) }
+}
+
+pub fn user_task_count() -> usize {
+    unsafe { (*USER_SCHEDULER.0.get()).task_count() }
+}
+
+pub fn user_task_info(index: usize) -> Option<UserTaskSnapshot> {
+    unsafe { (*USER_SCHEDULER.0.get()).task_info(index) }
 }

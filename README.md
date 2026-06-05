@@ -12,14 +12,18 @@ FAT32 application disk.
 - Builds a dedicated userland page-table root.
 - Starts Ring 3 tasks through `iretq` and saved trapframes.
 - Uses timer interrupt trapframes as scheduler context.
-- Builds a FAT32 application disk containing `GUI.ELF` and `SHELL.ELF`.
+- Builds a FAT32 application disk containing `GUI.ELF`, `SHELL.ELF`, and
+  `TASKVIEW.ELF`.
 - Reads that FAT32 disk through a first ATA PIO block-device path.
-- Parses GUI and shell ELF files in the kernel and starts them as Ring 3 tasks.
+- Parses GUI, shell, and task viewer ELF files in the kernel and starts them as
+  Ring 3 tasks.
 - Provides minimal GUI syscalls for clearing the screen, drawing rectangles,
-  and drawing tiny bitmap text.
-- Shows a movable "Hallo Welt!" window drawn by the userland GUI process.
+  and drawing scaled bitmap text.
+- Starts a passive userland GUI ELF that paints the desktop background.
 - Starts a second userland shell ELF with a single interactive shell window.
+- Starts a third userland task viewer ELF that displays the running user tasks.
 - Delivers PS/2 keyboard input through IRQ1 and a small `read_key` syscall.
+- Delivers PS/2 mouse input through IRQ12 and a small `read_mouse` syscall.
 - Supports the initial shell commands `version` and `shutdown`.
 
 ## Architecture
@@ -27,7 +31,8 @@ FAT32 application disk.
 - `src/main.rs`: kernel entry and bootstrap sequence.
 - `src/gdt.rs`: GDT, kernel/user segments, TSS, and kernel stacks.
 - `src/interrupts.rs`: IDT, exception diagnostics, PIC/PIT setup, timer IRQs,
-  keyboard IRQs, trapframe scheduling, and the `int 0x80` syscall boundary.
+  keyboard/mouse IRQs, trapframe scheduling, and the `int 0x80` syscall
+  boundary.
 - `src/memory.rs`: user page-table creation, user image pages, user stacks, and
   kernel-only framebuffer mapping for syscall handlers.
 - `src/scheduler.rs`: minimal kernel scheduler plus trapframe-based user task
@@ -37,6 +42,7 @@ FAT32 application disk.
 - `src/userland.rs`: address-space model, ELF loader, task frame setup, CR3
   switch, and Ring 3 entry.
 - `src/services.rs`: kernel-side framebuffer service used by GUI syscalls.
+- `src/mouse.rs`: tiny PS/2 mouse packet decoder.
 - `src/framebuffer.rs`: low-level pixel and rectangle drawing.
 - `src/limine.rs`: Limine framebuffer, HHDM, and kernel address requests.
 - `src/pci.rs` and `src/virtio.rs`: PCI scan, Virtio capability discovery, and
@@ -45,6 +51,8 @@ FAT32 application disk.
 - `user/gui/linker.ld`: GUI ELF linker script.
 - `user/shell/src/main.rs`: separate no_std Rust shell executable.
 - `user/shell/linker.ld`: shell ELF linker script.
+- `user/taskview/src/main.rs`: separate no_std Rust task viewer executable.
+- `user/taskview/linker.ld`: task viewer ELF linker script.
 
 ## Install Tools
 
@@ -82,6 +90,7 @@ The build script creates both:
 - `target/x86_64-unknown-none/release/nk`: the kernel.
 - `build/user/gui.elf`: the separate userland GUI executable.
 - `build/user/shell.elf`: the separate userland shell executable.
+- `build/user/taskview.elf`: the separate userland task viewer executable.
 - `build/nk-apps.fat32`: the FAT32 disk image containing the user programs.
 
 The ISO only contains the kernel and bootloader files. User programs are loaded
@@ -129,12 +138,12 @@ $disk = "$PWD\build\virtio-test.img"
 
 ## Next Useful Steps
 
-- Add real input delivery so the userland GUI window can be dragged by mouse or
-  keyboard instead of moving autonomously.
 - Add a compositor/window manager so GUI and shell windows no longer draw
   directly into the shared framebuffer.
-- Add mouse input and a compositor so windows can be moved deliberately rather
-  than drawing directly into the shared framebuffer.
+- Replace the interim scaled bitmap font with a loaded PSF or TrueType-derived
+  bitmap font.
+- Add dirty-rectangle or double-buffered drawing to remove the remaining direct
+  framebuffer redraw artifacts.
 - Replace the fixed user image buffer with per-process page allocation.
 - Split GUI syscalls into a proper capability-checked IPC protocol.
 - Move the FAT32 block backend from ATA PIO to Virtio block on `q35`.

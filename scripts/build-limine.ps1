@@ -89,10 +89,12 @@ New-Item -ItemType Directory -Force -Path (Join-Path $IsoRoot "boot") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $IsoRoot "EFI\BOOT") | Out-Null
 Build-UserProgram "gui"
 Build-UserProgram "shell"
+Build-UserProgram "taskview"
 Invoke-Checked python (Join-Path $Root "scripts\make-fat32.py") `
     (Join-Path $Build "nk-apps.fat32") `
     (Join-Path $Build "user\gui.elf") `
-    (Join-Path $Build "user\shell.elf")
+    (Join-Path $Build "user\shell.elf") `
+    (Join-Path $Build "user\taskview.elf")
 
 Copy-Item (Join-Path $Root "target\x86_64-unknown-none\release\nk") (Join-Path $IsoRoot "boot\nk")
 Copy-Item (Join-Path $Root "limine.conf") (Join-Path $IsoRoot "boot\limine.conf")

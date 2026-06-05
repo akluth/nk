@@ -36,7 +36,7 @@ pub mod gui {
         let mut cursor = x;
         for byte in text {
             draw_char(cursor, y, *byte, color);
-            cursor += 12;
+            cursor += 18;
         }
     }
 
@@ -49,12 +49,13 @@ pub mod gui {
     }
 
     fn draw_char(x: usize, y: usize, byte: u8, color: u32) {
+        const SCALE: usize = 3;
         let glyph = glyph(byte);
         with_framebuffer(|fb| {
             for (row, bits) in glyph.iter().enumerate() {
                 for col in 0..5 {
                     if bits & (1 << (4 - col)) != 0 {
-                        fb.rect(x + col * 2, y + row * 2, 2, 2, Color(color));
+                        fb.rect(x + col * SCALE, y + row * SCALE, SCALE, SCALE, Color(color));
                     }
                 }
             }
@@ -64,6 +65,8 @@ pub mod gui {
     fn glyph(byte: u8) -> [u8; 7] {
         match byte {
             b'!' => [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0, 0b00100],
+            b':' => [0, 0b00100, 0b00100, 0, 0b00100, 0b00100, 0],
+            b'-' => [0, 0, 0, 0b11111, 0, 0, 0],
             b'.' => [0, 0, 0, 0, 0, 0, 0b00100],
             b'>' => [0b10000, 0b01000, 0b00100, 0b00010, 0b00100, 0b01000, 0b10000],
             b' ' => [0, 0, 0, 0, 0, 0, 0],

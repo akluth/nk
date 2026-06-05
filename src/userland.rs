@@ -187,32 +187,34 @@ pub fn install_page_table_root(root: PageTableRoot) {
 }
 
 pub fn install_first_task() {
-    if let Some(gui) = crate::fat32::read_file(b"GUI     ELF") {
-        memory::clear_user_image();
-        if let Some(entry) = load_elf(gui) {
-            let stack_top = memory::user_stack_top(0);
+    install_user_elf(0, "gui", b"GUI     ELF", true);
+    install_user_elf(1, "shell", b"SHELL   ELF", false);
+    install_user_elf(2, "taskviewer", b"TASKVIEWELF", false);
+}
+
+fn install_user_elf(index: usize, name: &'static str, fat_name: &[u8; 11], clear_image: bool) {
+    if let Some(image) = crate::fat32::read_file(fat_name) {
+        if clear_image {
+            memory::clear_user_image();
+        }
+        if let Some(entry) = load_elf(image) {
+            let stack_top = memory::user_stack_top(index);
             unsafe {
                 (*USER_ADDRESS_SPACE.0.get()).install_task(entry, stack_top);
             }
-            install_task_frame(0, "gui", entry, stack_top);
-            serial::write_line("nk: gui elf process installed");
+            install_task_frame(index, name, entry, stack_top);
+            serial::write_str("nk: ");
+            serial::write_str(name);
+            serial::write_line(" elf process installed");
         } else {
-            serial::write_line("nk: gui elf load failed");
+            serial::write_str("nk: ");
+            serial::write_str(name);
+            serial::write_line(" elf load failed");
         }
     } else {
-        serial::write_line("nk: gui elf missing on fat32");
-    }
-
-    if let Some(shell) = crate::fat32::read_file(b"SHELL   ELF") {
-        if let Some(entry) = load_elf(shell) {
-            let stack_top = memory::user_stack_top(1);
-            install_task_frame(1, "shell", entry, stack_top);
-            serial::write_line("nk: shell elf process installed");
-        } else {
-            serial::write_line("nk: shell elf load failed");
-        }
-    } else {
-        serial::write_line("nk: shell elf missing on fat32");
+        serial::write_str("nk: ");
+        serial::write_str(name);
+        serial::write_line(" elf missing on fat32");
     }
 }
 

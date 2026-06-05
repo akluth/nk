@@ -511,6 +511,14 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
             frame.r10 as usize,
             frame.r8 as u32,
         ),
+        22 => {
+            frame.rax = scheduler::user_task_count() as u64;
+            return;
+        }
+        23 => {
+            frame.rax = packed_task_info(frame.rdi as usize);
+            return;
+        }
         32 => unsafe {
             serial::write_line("nk: shutdown requested");
             arch::outw(0x604, 0x2000);
@@ -523,6 +531,27 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
         }
     }
     frame.rax = 0;
+}
+
+fn packed_task_info(index: usize) -> u64 {
+    let Some(info) = scheduler::user_task_info(index) else {
+        return 0;
+    };
+    let name_id = match info.name {
+        "gui" => 1,
+        "shell" => 2,
+        "taskviewer" => 3,
+        _ => 0,
+    };
+    let mut flags = 0u64;
+    if info.active {
+        flags |= 1;
+    }
+    if info.current {
+        flags |= 2;
+    }
+
+    name_id | (flags << 8) | ((info.ticks & 0x0000_ffff_ffff) << 16)
 }
 
 #[no_mangle]

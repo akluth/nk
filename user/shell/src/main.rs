@@ -4,7 +4,6 @@
 use core::{arch::asm, panic::PanicInfo};
 
 const SYS_YIELD: u64 = 0;
-const SYS_GUI_CLEAR: u64 = 16;
 const SYS_GUI_RECT: u64 = 17;
 const SYS_GUI_TEXT_COLOR: u64 = 21;
 const SYS_READ_KEY: u64 = 19;
@@ -48,9 +47,10 @@ pub extern "C" fn _start() -> ! {
     let mut dragging = false;
     let mut drag_dx = 0u64;
     let mut drag_dy = 0u64;
-    let mut last_mouse_seq = 0xff;
+    let mut last_mouse = read_mouse();
+    let mut last_mouse_seq = last_mouse.seq;
 
-    redraw(x, y, &input, len, output, read_mouse());
+    redraw_window(x, y, &input, len, output, last_mouse);
     loop {
         let key = syscall0(SYS_READ_KEY) as u8;
         if key != 0 {
@@ -68,11 +68,15 @@ pub extern "C" fn _start() -> ! {
                 }
                 _ => {}
             }
-            redraw(x, y, &input, len, output, read_mouse());
+            last_mouse = read_mouse();
+            last_mouse_seq = last_mouse.seq;
+            redraw_window(x, y, &input, len, output, last_mouse);
         }
 
         let mouse = read_mouse();
         if mouse.seq != last_mouse_seq {
+            let previous = last_mouse;
+            last_mouse = mouse;
             last_mouse_seq = mouse.seq;
             let down = mouse.buttons & 1 != 0;
             if down && !dragging && hit_title(mouse, x, y) {
@@ -84,10 +88,13 @@ pub extern "C" fn _start() -> ! {
             }
 
             if dragging {
+                draw_desktop();
                 x = mouse.x.saturating_sub(drag_dx).clamp(20, 720);
                 y = mouse.y.saturating_sub(drag_dy).clamp(50, 420);
+                redraw_window(x, y, &input, len, output, mouse);
+            } else {
+                repair_pointer(previous, mouse, x, y, &input, len, output);
             }
-            redraw(x, y, &input, len, output, mouse);
         }
 
         syscall0(SYS_YIELD);
@@ -105,14 +112,13 @@ fn run_command(command: &[u8]) -> Output {
     }
 }
 
-fn redraw(x: u64, y: u64, input: &[u8; 32], len: usize, output: Output, mouse: Mouse) {
-    draw_desktop();
+fn redraw_window(x: u64, y: u64, input: &[u8; 32], len: usize, output: Output, mouse: Mouse) {
     draw_shell(x, y, input, len, output);
     draw_pointer(mouse.x, mouse.y);
 }
 
 fn draw_desktop() {
-    syscall1(SYS_GUI_CLEAR, BG as u64);
+    rect(0, 36, 1280, 684, BG);
     rect(0, 0, 1280, 36, PANEL);
     rect(18, 10, 16, 16, ACCENT);
     rect(46, 14, 160, 8, 0x00aab2bd);
@@ -120,25 +126,48 @@ fn draw_desktop() {
 }
 
 fn draw_shell(x: u64, y: u64, input: &[u8; 32], len: usize, output: Output) {
-    rect(x + 8, y + 8, 620, 320, SHADOW);
-    rect(x, y, 620, 320, WINDOW);
-    rect(x, y, 620, 36, TITLE);
+    rect(x, y, 680, 340, WINDOW);
+    rect(x + 680, y + 8, 8, 340, SHADOW);
+    rect(x + 8, y + 340, 680, 8, SHADOW);
+    rect(x, y, 680, 40, TITLE);
     rect(x + 16, y + 13, 10, 10, 0x00ff605c);
     rect(x + 34, y + 13, 10, 10, 0x00ffbd44);
     rect(x + 52, y + 13, 10, 10, 0x0000ca4e);
-    text(x + 84, y + 12, b"nk shell", LIGHT);
+    text(x + 84, y + 10, b"nk shell", LIGHT);
 
-    text(x + 34, y + 70, b"type: version  or  shutdown", MUTED);
-    text(x + 34, y + 120, b">", ACCENT);
-    text_bytes(x + 58, y + 120, &input[..len], INK);
-    rect(x + 58 + len as u64 * 12, y + 138, 10, 3, ACCENT);
+    text(x + 34, y + 76, b"type: version  or  shutdown", MUTED);
+    text(x + 34, y + 132, b">", ACCENT);
+    text_bytes(x + 70, y + 132, &input[..len], INK);
+    rect(x + 70 + len as u64 * 18, y + 154, 14, 4, ACCENT);
 
     match output {
-        Output::Ready => text(x + 34, y + 180, b"ready", MUTED),
-        Output::Version => text(x + 34, y + 180, b"nk 0.1.0", INK),
-        Output::Shutdown => text(x + 34, y + 180, b"shutting down", INK),
-        Output::Unknown => text(x + 34, y + 180, b"unknown command", INK),
+        Output::Ready => text(x + 34, y + 210, b"ready", MUTED),
+        Output::Version => text(x + 34, y + 210, b"nk 0.1.0", INK),
+        Output::Shutdown => text(x + 34, y + 210, b"shutting down", INK),
+        Output::Unknown => text(x + 34, y + 210, b"unknown command", INK),
     }
+}
+
+fn repair_pointer(
+    previous: Mouse,
+    mouse: Mouse,
+    x: u64,
+    y: u64,
+    input: &[u8; 32],
+    len: usize,
+    output: Output,
+) {
+    if pointer_hits_window(previous, x, y) || pointer_hits_window(mouse, x, y) {
+        draw_shell(x, y, input, len, output);
+    } else {
+        restore_desktop_at(previous.x, previous.y);
+    }
+    draw_pointer(mouse.x, mouse.y);
+}
+
+fn restore_desktop_at(x: u64, y: u64) {
+    let color = if y < 36 { PANEL } else { BG };
+    rect(x.saturating_sub(2), y.saturating_sub(2), 22, 26, color);
 }
 
 fn draw_pointer(x: u64, y: u64) {
@@ -149,7 +178,11 @@ fn draw_pointer(x: u64, y: u64) {
 }
 
 fn hit_title(mouse: Mouse, x: u64, y: u64) -> bool {
-    mouse.x >= x && mouse.x < x + 620 && mouse.y >= y && mouse.y < y + 36
+    mouse.x >= x && mouse.x < x + 680 && mouse.y >= y && mouse.y < y + 40
+}
+
+fn pointer_hits_window(mouse: Mouse, x: u64, y: u64) -> bool {
+    mouse.x + 14 >= x && mouse.x < x + 688 && mouse.y + 22 >= y && mouse.y < y + 348
 }
 
 fn read_mouse() -> Mouse {
@@ -178,14 +211,6 @@ fn syscall0(id: u64) -> u64 {
     let out;
     unsafe {
         asm!("int 0x80", inlateout("rax") id => out, options(nostack, preserves_flags));
-    }
-    out
-}
-
-fn syscall1(id: u64, a: u64) -> u64 {
-    let out;
-    unsafe {
-        asm!("int 0x80", inlateout("rax") id => out, in("rdi") a, options(nostack, preserves_flags));
     }
     out
 }
