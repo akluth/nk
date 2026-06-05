@@ -24,8 +24,22 @@ cargo build --release
 
 rm -rf "$BUILD"
 mkdir -p "$ISO_ROOT/boot" "$ISO_ROOT/EFI/BOOT"
+mkdir -p "$BUILD/user"
+
+rustc \
+  --edition=2021 \
+  --crate-type=bin \
+  --target=x86_64-unknown-none \
+  -C panic=abort \
+  -C relocation-model=static \
+  -C code-model=small \
+  -C linker=rust-lld \
+  "-Clink-arg=-T$ROOT/user/gui/linker.ld" \
+  -o "$BUILD/user/gui.elf" \
+  "$ROOT/user/gui/src/main.rs"
 
 cp "$ROOT/target/x86_64-unknown-none/release/nk" "$ISO_ROOT/boot/nk"
+cp "$BUILD/user/gui.elf" "$ISO_ROOT/boot/gui.elf"
 cp "$ROOT/limine.conf" "$ISO_ROOT/boot/limine.conf"
 cp "$LIMINE/limine-bios.sys" "$LIMINE/limine-bios-cd.bin" "$LIMINE/limine-uefi-cd.bin" "$ISO_ROOT/"
 cp "$LIMINE/BOOTX64.EFI" "$ISO_ROOT/EFI/BOOT/BOOTX64.EFI"

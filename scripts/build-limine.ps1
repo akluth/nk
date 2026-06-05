@@ -35,6 +35,27 @@ function ConvertTo-MsysPath {
     return "/$Drive$Tail"
 }
 
+function Build-UserGui {
+    $GuiOut = Join-Path $Build "user\gui.elf"
+    New-Item -ItemType Directory -Force -Path (Split-Path $GuiOut) | Out-Null
+    $Args = @(
+        "--edition=2021",
+        "--crate-type=bin",
+        "--target=x86_64-unknown-none",
+        "-C", "panic=abort",
+        "-C", "relocation-model=static",
+        "-C", "code-model=small",
+        "-C", "linker=rust-lld",
+        "-C", "link-arg=-T$Root\user\gui\linker.ld",
+        "-o", $GuiOut,
+        (Join-Path $Root "user\gui\src\main.rs")
+    )
+    & rustc @Args
+    if ($LASTEXITCODE -ne 0) {
+        throw "rustc failed to build user/gui with exit code $LASTEXITCODE"
+    }
+}
+
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "cargo wurde nicht gefunden. Starte scripts\install-tools-admin.ps1 in einer Administrator-PowerShell."
 }
@@ -62,8 +83,10 @@ Invoke-Checked cargo build --release
 Remove-Item -Recurse -Force $Build -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path (Join-Path $IsoRoot "boot") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $IsoRoot "EFI\BOOT") | Out-Null
+Build-UserGui
 
 Copy-Item (Join-Path $Root "target\x86_64-unknown-none\release\nk") (Join-Path $IsoRoot "boot\nk")
+Copy-Item (Join-Path $Build "user\gui.elf") (Join-Path $IsoRoot "boot\gui.elf")
 Copy-Item (Join-Path $Root "limine.conf") (Join-Path $IsoRoot "boot\limine.conf")
 Copy-Item (Join-Path $Limine "limine-bios.sys") $IsoRoot
 Copy-Item (Join-Path $Limine "limine-bios-cd.bin") $IsoRoot

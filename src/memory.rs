@@ -7,9 +7,10 @@ const PAGE_ENTRIES: usize = 512;
 const TABLE_COUNT: usize = 24;
 const KERNEL_MAPPED_PAGES: usize = 4096;
 const KERNEL_PT_COUNT: usize = (KERNEL_MAPPED_PAGES + PAGE_ENTRIES - 1) / PAGE_ENTRIES + 1;
-pub const USER_CODE_VIRT: u64 = 0x0000_4000_0000;
-pub const USER_TASK_STRIDE: u64 = 0x0000_0000_0000_1000;
-pub const USER_STACK_BASE: u64 = 0x0000_4000_3000;
+pub const USER_IMAGE_BASE: u64 = 0x0000_0000_4000_0000;
+pub const USER_IMAGE_SIZE: usize = 1024 * 1024;
+pub const USER_IMAGE_PAGES: usize = USER_IMAGE_SIZE / PAGE_SIZE as usize;
+pub const USER_STACK_BASE: u64 = 0x0000_0000_4018_0000;
 
 const PTE_PRESENT: u64 = 1 << 0;
 const PTE_WRITABLE: u64 = 1 << 1;
@@ -47,7 +48,15 @@ impl PageTableRoot {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct FramebufferMapping {
+    pub virt: u64,
+    pub phys: u64,
+    pub len: u64,
+}
+
 #[repr(align(4096))]
+#[allow(dead_code)]
 pub struct UserPage {
     bytes: [u8; PAGE_SIZE as usize],
 }
@@ -61,12 +70,27 @@ impl UserPage {
 
 }
 
-static mut USER_CODE_PAGE: UserPage = UserPage::empty();
-static mut USER_CODE_PAGE_1: UserPage = UserPage::empty();
+#[repr(align(4096))]
+pub struct UserImage {
+    bytes: [u8; USER_IMAGE_SIZE],
+}
+
+impl UserImage {
+    const fn empty() -> Self {
+        Self {
+            bytes: [0; USER_IMAGE_SIZE],
+        }
+    }
+}
+
+static mut USER_IMAGE: UserImage = UserImage::empty();
 static mut USER_STACK_PAGE: UserPage = UserPage::empty();
 static mut USER_STACK_PAGE_1: UserPage = UserPage::empty();
 
-pub fn create_user_address_space(kernel: KernelAddress) -> Option<PageTableRoot> {
+pub fn create_user_address_space(
+    kernel: KernelAddress,
+    framebuffer: Option<FramebufferMapping>,
+) -> Option<PageTableRoot> {
     unsafe {
         let tables = &mut *PAGE_TABLES.0.get();
         for table in tables.iter_mut() {
@@ -80,28 +104,37 @@ pub fn create_user_address_space(kernel: KernelAddress) -> Option<PageTableRoot>
         let kernel_pdpt = 4;
         let kernel_pd = 5;
         let kernel_pts = 6;
+        let framebuffer_pdpt = 15;
+        let framebuffer_pd = 16;
+        let framebuffer_pts = 17;
 
         link_table(tables, kernel, pml4, 0, pdpt, PTE_USER);
         link_table(tables, kernel, pdpt, 1, user_pd, PTE_USER);
         link_table(tables, kernel, user_pd, 0, user_pt, PTE_USER);
-        let user_code_phys = page_phys(core::ptr::addr_of!(USER_CODE_PAGE), kernel);
-        let user_code_1_phys = page_phys(core::ptr::addr_of!(USER_CODE_PAGE_1), kernel);
         let user_stack_phys = page_phys(core::ptr::addr_of!(USER_STACK_PAGE), kernel);
         let user_stack_1_phys = page_phys(core::ptr::addr_of!(USER_STACK_PAGE_1), kernel);
 
-        map_page(tables, user_pt, 0, user_code_phys, PTE_USER);
-        map_page(tables, user_pt, 1, user_code_1_phys, PTE_USER);
+        let user_image_phys = virt_to_phys(core::ptr::addr_of!(USER_IMAGE) as u64, kernel);
+        for page in 0..USER_IMAGE_PAGES {
+            map_page(
+                tables,
+                user_pt,
+                page,
+                user_image_phys + (page as u64 * PAGE_SIZE),
+                PTE_USER,
+            );
+        }
         map_page(
             tables,
             user_pt,
-            2,
+            ((USER_STACK_BASE - USER_IMAGE_BASE) / PAGE_SIZE) as usize,
             user_stack_phys,
             PTE_USER | PTE_NO_EXECUTE,
         );
         map_page(
             tables,
             user_pt,
-            4,
+            ((USER_STACK_BASE - USER_IMAGE_BASE) / PAGE_SIZE) as usize + 1,
             user_stack_1_phys,
             PTE_USER | PTE_NO_EXECUTE,
         );
@@ -125,11 +158,65 @@ pub fn create_user_address_space(kernel: KernelAddress) -> Option<PageTableRoot>
             );
         }
 
+        if let Some(framebuffer) = framebuffer {
+            map_range(
+                tables,
+                kernel,
+                pml4,
+                framebuffer_pdpt,
+                framebuffer_pd,
+                framebuffer_pts,
+                framebuffer.virt,
+                framebuffer.phys,
+                framebuffer.len,
+                PTE_NO_EXECUTE,
+            );
+        }
+
         let _ = PAGE_SIZE;
         serial::write_line("nk: user page tables created");
         Some(PageTableRoot {
             pml4_phys: table_phys(tables, kernel, pml4),
         })
+    }
+}
+
+unsafe fn map_range(
+    tables: &mut [PageTable; TABLE_COUNT],
+    kernel: KernelAddress,
+    pml4: usize,
+    pdpt: usize,
+    pd: usize,
+    pts_start: usize,
+    virt: u64,
+    phys: u64,
+    len: u64,
+    extra_flags: u64,
+) {
+    let aligned_virt = virt & !(PAGE_SIZE - 1);
+    let page_offset = virt - aligned_virt;
+    let aligned_phys = phys - page_offset;
+    let pages = ((len + page_offset + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
+    let (pml4_index, pdpt_index, pd_index, pt_index) = page_indexes(aligned_virt);
+
+    link_table(tables, kernel, pml4, pml4_index, pdpt, 0);
+    link_table(tables, kernel, pdpt, pdpt_index, pd, 0);
+
+    let pt_count = (pt_index + pages + PAGE_ENTRIES - 1) / PAGE_ENTRIES;
+    for table in 0..pt_count {
+        link_table(tables, kernel, pd, pd_index + table, pts_start + table, 0);
+    }
+
+    for page in 0..pages {
+        let table = pts_start + ((pt_index + page) / PAGE_ENTRIES);
+        let entry = (pt_index + page) % PAGE_ENTRIES;
+        map_page(
+            tables,
+            table,
+            entry,
+            aligned_phys + (page as u64 * PAGE_SIZE),
+            extra_flags,
+        );
     }
 }
 
@@ -176,24 +263,40 @@ fn page_indexes(virt: u64) -> (usize, usize, usize, usize) {
     )
 }
 
-pub fn install_user_code(index: usize, code: &[u8]) -> Option<(u64, u64)> {
-    if code.len() > PAGE_SIZE as usize {
-        return None;
+pub fn clear_user_image() {
+    unsafe {
+        let image = &mut *core::ptr::addr_of_mut!(USER_IMAGE);
+        for byte in &mut image.bytes {
+            *byte = 0;
+        }
+    }
+}
+
+pub fn copy_user_segment(virt: u64, data: &[u8], mem_size: usize) -> bool {
+    if virt < USER_IMAGE_BASE {
+        return false;
+    }
+
+    let offset = (virt - USER_IMAGE_BASE) as usize;
+    if offset
+        .checked_add(mem_size)
+        .map_or(true, |end| end > USER_IMAGE_SIZE)
+        || data.len() > mem_size
+    {
+        return false;
     }
 
     unsafe {
-        let page = match index {
-            0 => &mut *core::ptr::addr_of_mut!(USER_CODE_PAGE),
-            1 => &mut *core::ptr::addr_of_mut!(USER_CODE_PAGE_1),
-            _ => return None,
-        };
-        for byte in &mut page.bytes {
-            *byte = 0x90;
+        let image = &mut *core::ptr::addr_of_mut!(USER_IMAGE);
+        image.bytes[offset..offset + data.len()].copy_from_slice(data);
+        for byte in &mut image.bytes[offset + data.len()..offset + mem_size] {
+            *byte = 0;
         }
-        page.bytes[..code.len()].copy_from_slice(code);
-        Some((
-            USER_CODE_VIRT + (index as u64 * USER_TASK_STRIDE),
-            USER_STACK_BASE + (index as u64 * 0x2000),
-        ))
     }
+
+    true
+}
+
+pub const fn user_stack_top() -> u64 {
+    USER_STACK_BASE + PAGE_SIZE * 2
 }

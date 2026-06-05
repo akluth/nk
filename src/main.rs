@@ -2,7 +2,6 @@
 #![no_main]
 
 mod arch;
-mod desktop;
 mod framebuffer;
 mod gdt;
 mod ipc;
@@ -49,9 +48,17 @@ mod microkernel {
             scheduler::install(self.scheduler);
             self.ipc.publish(ipc::Message::new("kernel", "desktop", "paint"));
 
-            if let Some(mut fb) = limine::framebuffer() {
+            let mut framebuffer_mapping = None;
+            if let Some(fb) = limine::framebuffer() {
                 serial::write_line("nk: framebuffer found");
-                services::gui::GuiService::new().run(&mut fb);
+                if let Some(hhdm_offset) = limine::hhdm_offset() {
+                    framebuffer_mapping = Some(memory::FramebufferMapping {
+                        virt: fb.address(),
+                        phys: fb.address() - hhdm_offset,
+                        len: fb.byte_len(),
+                    });
+                }
+                services::gui::install(fb);
             } else {
                 serial::write_line("nk: no framebuffer response");
             }
@@ -61,7 +68,7 @@ mod microkernel {
             userland::init();
             let mut can_enter_user = false;
             if let Some(kernel_address) = limine::kernel_address() {
-                if let Some(root) = memory::create_user_address_space(kernel_address) {
+                if let Some(root) = memory::create_user_address_space(kernel_address, framebuffer_mapping) {
                     userland::install_page_table_root(root);
                     can_enter_user = true;
                 }

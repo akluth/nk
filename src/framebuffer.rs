@@ -60,4 +60,12 @@ impl Framebuffer {
             }
         }
     }
+
+    pub fn address(&self) -> u64 {
+        self.address as u64
+    }
+
+    pub fn byte_len(&self) -> u64 {
+        (self.pitch * self.height) as u64
+    }
 }

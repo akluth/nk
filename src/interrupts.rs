@@ -1,6 +1,6 @@
 use core::arch::global_asm;
 
-use crate::{arch, gdt, scheduler, serial};
+use crate::{arch, gdt, scheduler, serial, services};
 
 const IDT_ENTRIES: usize = 256;
 const GENERAL_PROTECTION_VECTOR: u8 = 13;
@@ -372,10 +372,31 @@ extern "C" fn rust_unhandled_interrupt(_frame: *mut scheduler::TrapFrame) {
 
 #[no_mangle]
 extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
-    let syscall = unsafe { (*frame).rax };
-    serial::write_str("nk: syscall boundary crossed id=");
-    serial::write_dec_u8(syscall as u8);
-    serial::write_line("");
+    let frame = unsafe { &mut *frame };
+    match frame.rax {
+        0 => {}
+        16 => services::gui::clear(frame.rdi as u32),
+        17 => services::gui::rect(
+            frame.rdi as usize,
+            frame.rsi as usize,
+            frame.rdx as usize,
+            frame.r10 as usize,
+            frame.r8 as u32,
+        ),
+        18 => services::gui::text(
+            frame.rdi as usize,
+            frame.rsi as usize,
+            frame.rdx as *const u8,
+            frame.r10 as usize,
+            0x001a202c,
+        ),
+        id => {
+            serial::write_str("nk: unknown syscall id=");
+            serial::write_dec_u8(id as u8);
+            serial::write_line("");
+        }
+    }
+    frame.rax = 0;
 }
 
 #[no_mangle]

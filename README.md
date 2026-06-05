@@ -1,33 +1,47 @@
 # nk
 
-`nk` ist ein sehr kleines x86-64-Betriebssystem in Rust. Es bootet ueber den modernen Limine-Bootloader auf BIOS- und UEFI-Systemen, startet einen no_std-Mikrokernel-Skeleton und zeichnet eine extrem einfache Desktopoberflaeche direkt in den Framebuffer.
+`nk` is a tiny x86-64 operating system written in Rust. It boots through the
+Limine bootloader on BIOS and UEFI systems, brings up a small microkernel-style
+core, starts Ring 3 tasks, and now launches a minimal GUI as a separate ELF
+binary.
 
-## Architektur
+## Current Status
 
-- `src/main.rs`: Kernel-Einstieg und Bootstrap.
-- `src/scheduler.rs`: minimaler Kernel-Scheduler plus Trapframe-basierter Round-Robin-Scheduler fuer Ring-3-Tasks.
-- `src/interrupts.rs`: IDT, PIC-Remapping, PIT-Timer, Exception-Diagnose und `int 0x80`-Syscall-Grenze.
-- `src/ipc.rs`: simple Message-Bus-Schnittstelle fuer spaetere Services.
-- `src/limine.rs`: Limine-Framebuffer-Request.
-- `src/framebuffer.rs`: Pixel- und Rechteck-Zeichenroutinen.
-- `src/services.rs` und `src/desktop.rs`: erste GUI-Service-Huelle und Desktopansicht.
-- `src/gdt.rs`: GDT, Kernel/User-Segmente, TSS und erste IST/Kern-Stacks.
-- `src/memory.rs`: Page-Table-Erzeugung fuer einen isolierbaren Userland-Adressraum samt mehreren User-Code- und User-Stack-Seiten.
-- `src/pci.rs` und `src/virtio.rs`: PCI-Scan, Virtio-Capabilities und erste Queue-Speicher.
-- `src/userland.rs`: Adressraum-Modell, Page-Table-Root, `CR3`-Wechsel und `iretq`-Start mehrerer Ring-3-Tasks.
+- Boots in QEMU through Limine/BIOS.
+- Initializes GDT/TSS, IDT, PIC, and the PIT timer.
+- Builds a dedicated userland page-table root.
+- Starts Ring 3 tasks through `iretq` and saved trapframes.
+- Uses timer interrupt trapframes as scheduler context.
+- Loads `/boot/gui.elf` as a Limine boot module.
+- Parses the GUI ELF in the kernel and starts it as a user process.
+- Provides minimal GUI syscalls for clearing the screen, drawing rectangles,
+  and drawing tiny bitmap text.
+- Shows a movable "Hallo Welt!" window drawn by the userland GUI process.
 
-## Aktueller Kernel-Status
+## Architecture
 
-- Startet unter QEMU ueber Limine/BIOS.
-- Initialisiert GDT/TSS, IDT, PIC und PIT.
-- Baut einen eigenen Userland-Page-Table-Root.
-- Startet zwei Ring-3-Tasks mit getrennten Code- und Stack-Seiten.
-- Nutzt Timer-Interrupt-Trapframes als Scheduler-Kontext und wechselt beide User-Tasks preemptiv.
-- Erreicht die Syscall-Grenze via `int 0x80` aus Ring 3.
+- `src/main.rs`: kernel entry and bootstrap sequence.
+- `src/gdt.rs`: GDT, kernel/user segments, TSS, and kernel stacks.
+- `src/interrupts.rs`: IDT, exception diagnostics, PIC/PIT setup, timer IRQs,
+  trapframe scheduling, and the `int 0x80` syscall boundary.
+- `src/memory.rs`: user page-table creation, user image pages, user stacks, and
+  kernel-only framebuffer mapping for syscall handlers.
+- `src/scheduler.rs`: minimal kernel scheduler plus trapframe-based user task
+  scheduling.
+- `src/userland.rs`: address-space model, ELF loader, task frame setup, CR3
+  switch, and Ring 3 entry.
+- `src/services.rs`: kernel-side framebuffer service used by GUI syscalls.
+- `src/framebuffer.rs`: low-level pixel and rectangle drawing.
+- `src/limine.rs`: Limine framebuffer, HHDM, kernel address, and module
+  requests.
+- `src/pci.rs` and `src/virtio.rs`: PCI scan, Virtio capability discovery, and
+  early queue memory setup.
+- `user/gui/src/main.rs`: separate no_std Rust GUI executable.
+- `user/gui/linker.ld`: GUI ELF linker script.
 
-## Tools installieren
+## Install Tools
 
-Windows mit Administrator-PowerShell:
+Windows with an administrator PowerShell:
 
 ```powershell
 .\scripts\install-tools-admin.ps1
@@ -39,43 +53,54 @@ Linux/WSL/Ubuntu:
 ./scripts/install-tools-ubuntu.sh
 ```
 
-Hinweis: Der lokale Chocolatey-Installationsversuch kann ohne Administratorrechte scheitern, weil Chocolatey nach `C:\ProgramData` schreiben muss.
+The Windows installer uses Chocolatey, which requires access to
+`C:\ProgramData`.
 
-## Bauen
+## Build
+
+Windows:
 
 ```powershell
 .\scripts\build-limine.ps1
 ```
 
-Unter Linux/WSL:
+Linux/WSL:
 
 ```bash
 ./scripts/build-limine.sh
 ```
 
-Das Skript laedt Limine aus dem Binary-Branch nach und erzeugt `build/nk.iso`. Unter Windows nutzt es automatisch MSYS2-`xorriso`, falls kein natives `xorriso.exe` im PATH liegt.
+The build script creates both:
 
-## In QEMU starten
+- `target/x86_64-unknown-none/release/nk`: the kernel.
+- `build/user/gui.elf`: the separate userland GUI executable.
+
+Both files are copied into the ISO under `/boot`.
+
+## Run in QEMU
+
+Windows:
 
 ```powershell
 .\scripts\build-limine.ps1 -Run
 ```
 
-UEFI-Test mit edk2/OVMF aus der QEMU-Installation:
+UEFI test with edk2/OVMF from the QEMU installation:
 
 ```powershell
 .\scripts\build-limine.ps1 -Run -Uefi
 ```
 
-Oder unter Linux/WSL:
+Linux/WSL:
 
 ```bash
 ./scripts/build-limine.sh run
 ```
 
-## Virtio-Smoke-Test
+## Virtio Smoke Test
 
-Mit einem Virtio-Blockgeraet und Virtio-Keyboard zeigt das Serial-Log erkannte Virtio-PCI-Geraete:
+With a Virtio block device and Virtio keyboard, the serial log prints detected
+Virtio PCI devices:
 
 ```powershell
 $disk = "$PWD\build\virtio-test.img"
@@ -88,9 +113,11 @@ $disk = "$PWD\build\virtio-test.img"
   -serial stdio
 ```
 
-## Naechste sinnvolle Schritte
+## Next Useful Steps
 
-- Virtio-Queues in den Geraeten registrieren und erste Block/Input-Requests ausfuehren.
-- Framebuffer oder GUI-IPC als kontrollierte Userland-Schnittstelle definieren.
-- Einen echten Syscall-Dispatcher mit User-Pointern, Fehlercodes und Kernel-Objektrechten bauen.
-- GUI-Service aus der Kernel-Huelle in einen echten isolierten Userland-Task mit eigener Message-Loop verschieben.
+- Add real input delivery so the userland GUI window can be dragged by mouse or
+  keyboard instead of moving autonomously.
+- Replace the fixed user image buffer with per-process page allocation.
+- Split GUI syscalls into a proper capability-checked IPC protocol.
+- Register Virtio queues with devices and issue the first block/input requests.
+- Move more kernel-side services behind explicit userland/server boundaries.

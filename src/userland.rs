@@ -187,28 +187,21 @@ pub fn install_page_table_root(root: PageTableRoot) {
 }
 
 pub fn install_first_task() {
-    const USER_CODE_0: &[u8] = &[
-        0xb8, 0x00, 0x00, 0x00, 0x00, // mov eax, 0
-        0xcd, 0x80, // int 0x80
-        0xeb, 0xfe, // jmp $
-    ];
-    const USER_CODE_1: &[u8] = &[
-        0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
-        0xcd, 0x80, // int 0x80
-        0xeb, 0xfe, // jmp $
-    ];
-
-    if let Some((entry, stack_top)) = memory::install_user_code(0, USER_CODE_0) {
-        unsafe {
-            (*USER_ADDRESS_SPACE.0.get()).install_task(entry, stack_top);
+    if let Some(gui) = crate::limine::module_named("gui") {
+        if let Some(entry) = load_elf(gui) {
+            let stack_top = memory::user_stack_top();
+            unsafe {
+                (*USER_ADDRESS_SPACE.0.get()).install_task(entry, stack_top);
+            }
+            install_task_frame(0, "gui", entry, stack_top);
+            serial::write_line("nk: gui elf process installed");
+            return;
         }
-        install_task_frame(0, "user0", entry, stack_top);
-    }
-    if let Some((entry, stack_top)) = memory::install_user_code(1, USER_CODE_1) {
-        install_task_frame(1, "user1", entry, stack_top);
-    }
 
-    serial::write_line("nk: ring3 tasks installed");
+        serial::write_line("nk: gui elf load failed");
+    } else {
+        serial::write_line("nk: gui module missing");
+    }
 }
 
 pub fn start_first_task() -> ! {
@@ -254,6 +247,68 @@ fn install_task_frame(index: usize, name: &'static str, entry: VirtAddr, stack_t
             ss: data as u64,
         },
     );
+}
+
+fn load_elf(image: &[u8]) -> Option<u64> {
+    if image.len() < 64 || &image[0..4] != b"\x7fELF" {
+        return None;
+    }
+    if image[4] != 2 || image[5] != 1 || read_u16(image, 16)? != 2 {
+        return None;
+    }
+    if read_u16(image, 18)? != 0x3e {
+        return None;
+    }
+
+    let entry = read_u64(image, 24)?;
+    let phoff = read_u64(image, 32)? as usize;
+    let phentsize = read_u16(image, 54)? as usize;
+    let phnum = read_u16(image, 56)? as usize;
+    if phentsize < 56 {
+        return None;
+    }
+
+    memory::clear_user_image();
+    for index in 0..phnum {
+        let offset = phoff.checked_add(index.checked_mul(phentsize)?)?;
+        if offset.checked_add(phentsize)? > image.len() {
+            return None;
+        }
+        if read_u32(image, offset)? != 1 {
+            continue;
+        }
+
+        let file_offset = read_u64(image, offset + 8)? as usize;
+        let virt = read_u64(image, offset + 16)?;
+        let file_size = read_u64(image, offset + 32)? as usize;
+        let mem_size = read_u64(image, offset + 40)? as usize;
+        let file_end = file_offset.checked_add(file_size)?;
+        if file_end > image.len() {
+            return None;
+        }
+        if !memory::copy_user_segment(virt, &image[file_offset..file_end], mem_size) {
+            return None;
+        }
+    }
+
+    Some(entry)
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let data = bytes.get(offset..offset + 2)?;
+    Some(u16::from_le_bytes([data[0], data[1]]))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let data = bytes.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    let data = bytes.get(offset..offset + 8)?;
+    Some(u64::from_le_bytes([
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+    ]))
 }
 
 pub fn smoke_test_syscall() {
