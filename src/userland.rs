@@ -1,6 +1,13 @@
-use core::{arch::asm, cell::UnsafeCell};
+use core::{
+    arch::{asm, global_asm},
+    cell::UnsafeCell,
+};
 
-use crate::{gdt, memory::PageTableRoot, serial};
+use crate::{
+    gdt,
+    memory::{self, PageTableRoot},
+    serial,
+};
 
 pub type VirtAddr = u64;
 pub type PhysAddr = u64;
@@ -43,6 +50,8 @@ impl MappingFlags {
 pub struct AddressSpace {
     mappings: [Option<Mapping>; 16],
     root: Option<PageTableRoot>,
+    entry: VirtAddr,
+    stack_top: VirtAddr,
 }
 
 impl AddressSpace {
@@ -50,6 +59,8 @@ impl AddressSpace {
         Self {
             mappings: [None; 16],
             root: None,
+            entry: 0,
+            stack_top: 0,
         }
     }
 
@@ -86,6 +97,23 @@ impl AddressSpace {
     pub fn install_root(&mut self, root: PageTableRoot) {
         self.root = Some(root);
     }
+
+    pub fn install_task(&mut self, entry: VirtAddr, stack_top: VirtAddr) {
+        self.entry = entry;
+        self.stack_top = stack_top;
+    }
+
+    pub fn root(&self) -> Option<PageTableRoot> {
+        self.root
+    }
+
+    pub fn entry(&self) -> VirtAddr {
+        self.entry
+    }
+
+    pub fn stack_top(&self) -> VirtAddr {
+        self.stack_top
+    }
 }
 
 struct GlobalAddressSpace(UnsafeCell<AddressSpace>);
@@ -94,6 +122,28 @@ unsafe impl Sync for GlobalAddressSpace {}
 
 static USER_ADDRESS_SPACE: GlobalAddressSpace =
     GlobalAddressSpace(UnsafeCell::new(AddressSpace::new()));
+
+extern "C" {
+    fn enter_ring3(pml4: u64, entry: u64, stack: u64, code: u16, data: u16, kernel_stack: u64) -> !;
+}
+
+global_asm!(
+    r#"
+    .global enter_ring3
+enter_ring3:
+    mov rsp, r9
+    mov cr3, rdi
+    push r8
+    push rdx
+    pushfq
+    pop rax
+    or rax, 0x200
+    push rax
+    push rcx
+    push rsi
+    iretq
+"#
+);
 
 pub fn init() {
     let address_space = unsafe { &mut *USER_ADDRESS_SPACE.0.get() };
@@ -119,6 +169,39 @@ pub fn install_page_table_root(root: PageTableRoot) {
     let (user_code, user_data) = gdt::user_selectors();
     let _ = (user_code, user_data);
     serial::write_line("nk: user page-table root installed");
+}
+
+pub fn install_first_task() {
+    const USER_CODE: &[u8] = &[
+        0xb8, 0x00, 0x00, 0x00, 0x00, // mov eax, 0
+        0xcd, 0x80, // int 0x80
+        0xeb, 0xfe, // jmp $
+    ];
+
+    if let Some((entry, stack_top)) = memory::install_user_code(USER_CODE) {
+        unsafe {
+            (*USER_ADDRESS_SPACE.0.get()).install_task(entry, stack_top);
+        }
+        serial::write_line("nk: first ring3 task installed");
+    }
+}
+
+pub fn start_first_task() -> ! {
+    let address_space = unsafe { &mut *USER_ADDRESS_SPACE.0.get() };
+    let root = address_space.root().expect("user page-table root missing");
+    let (code, data) = gdt::user_selectors();
+
+    serial::write_line("nk: entering ring3");
+    unsafe {
+        enter_ring3(
+            root.pml4_phys(),
+            address_space.entry(),
+            address_space.stack_top(),
+            code,
+            data,
+            gdt::kernel_stack_top(),
+        );
+    }
 }
 
 pub fn smoke_test_syscall() {

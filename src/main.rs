@@ -59,11 +59,21 @@ mod microkernel {
             interrupts::init();
             serial::write_line("nk: interrupts enabled");
             userland::init();
-            if let Some(root) = memory::create_user_address_space() {
-                userland::install_page_table_root(root);
+            let mut can_enter_user = false;
+            if let Some(kernel_address) = limine::kernel_address() {
+                if let Some(root) = memory::create_user_address_space(kernel_address) {
+                    userland::install_page_table_root(root);
+                    can_enter_user = true;
+                }
+            } else {
+                serial::write_line("nk: no kernel address response");
             }
             userland::smoke_test_syscall();
             virtio::init();
+            if can_enter_user {
+                userland::install_first_task();
+                userland::start_first_task();
+            }
 
             loop {
                 arch::halt();

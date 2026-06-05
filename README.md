@@ -12,9 +12,9 @@
 - `src/framebuffer.rs`: Pixel- und Rechteck-Zeichenroutinen.
 - `src/services.rs` und `src/desktop.rs`: erste GUI-Service-Huelle und Desktopansicht.
 - `src/gdt.rs`: GDT, Kernel/User-Segmente, TSS und erste IST/Kern-Stacks.
-- `src/memory.rs`: Page-Table-Erzeugung fuer einen isolierbaren Userland-Adressraum.
+- `src/memory.rs`: Page-Table-Erzeugung fuer einen isolierbaren Userland-Adressraum samt User-Code- und User-Stack-Seite.
 - `src/pci.rs` und `src/virtio.rs`: PCI-Scan, Virtio-Capabilities und erste Queue-Speicher.
-- `src/userland.rs`: Adressraum-Modell, Page-Table-Root und erster Syscall-Smoke-Test.
+- `src/userland.rs`: Adressraum-Modell, Page-Table-Root, erster `CR3`-Wechsel und `iretq`-Start nach Ring 3.
 
 ## Tools installieren
 
@@ -81,7 +81,7 @@ $disk = "$PWD\build\virtio-test.img"
 
 ## Naechste sinnvolle Schritte
 
-- CR3-Wechsel auf den Userland-Page-Table-Root und echte Ring-3-Ausfuehrung per `iretq`.
-- Userland-Stacks und Trap-Frames als Scheduler-Kontext modellieren.
+- Trap-Frames als Scheduler-Kontext modellieren und mehrere Ring-3-Tasks preemptiv wechseln.
 - Virtio-Queues in den Geraeten registrieren und erste Block/Input-Requests ausfuehren.
-- GUI-Service aus der Kernel-Huelle in einen echten isolierten Userland-Task verschieben.
+- Framebuffer oder GUI-IPC als kontrollierte Userland-Schnittstelle definieren.
+- GUI-Service aus der Kernel-Huelle in einen echten isolierten Userland-Task mit eigener Message-Loop verschieben.

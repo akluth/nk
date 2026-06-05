@@ -1,10 +1,30 @@
 use crate::framebuffer::Framebuffer;
 
+#[derive(Clone, Copy)]
+pub struct KernelAddress {
+    pub physical_base: u64,
+    pub virtual_base: u64,
+}
+
 #[repr(C)]
 struct FramebufferRequest {
     id: [u64; 4],
     revision: u64,
     response: *const FramebufferResponse,
+}
+
+#[repr(C)]
+struct KernelAddressRequest {
+    id: [u64; 4],
+    revision: u64,
+    response: *const KernelAddressResponse,
+}
+
+#[repr(C)]
+struct KernelAddressResponse {
+    revision: u64,
+    physical_base: u64,
+    virtual_base: u64,
 }
 
 #[repr(C)]
@@ -62,6 +82,19 @@ static mut FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest {
 };
 
 #[used]
+#[link_section = ".limine_requests"]
+static mut KERNEL_ADDRESS_REQUEST: KernelAddressRequest = KernelAddressRequest {
+    id: [
+        0xc7b1dd30df4c8b88,
+        0x0a82e883a194f07b,
+        0x71ba76863cc55f63,
+        0xb2644a48c516a487,
+    ],
+    revision: 0,
+    response: core::ptr::null(),
+};
+
+#[used]
 #[link_section = ".limine_requests_end"]
 static LIMINE_REQUESTS_END: [u64; 2] = [0xadc0e0531bb10d03, 0x9572709f31764c62];
 
@@ -84,5 +117,19 @@ pub fn framebuffer() -> Option<Framebuffer> {
             fb.pitch as usize,
             fb.bpp as usize,
         ))
+    }
+}
+
+pub fn kernel_address() -> Option<KernelAddress> {
+    unsafe {
+        let response = core::ptr::addr_of!(KERNEL_ADDRESS_REQUEST)
+            .as_ref()?
+            .response
+            .as_ref()?;
+
+        Some(KernelAddress {
+            physical_base: response.physical_base,
+            virtual_base: response.virtual_base,
+        })
     }
 }

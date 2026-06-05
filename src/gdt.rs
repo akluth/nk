@@ -120,3 +120,7 @@ unsafe fn stack_top(stack: *const Stack) -> u64 {
 pub fn user_selectors() -> (u16, u16) {
     (USER_CODE_SELECTOR, USER_DATA_SELECTOR)
 }
+
+pub fn kernel_stack_top() -> u64 {
+    unsafe { stack_top(core::ptr::addr_of!(KERNEL_STACK)) }
+}
