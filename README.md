@@ -6,10 +6,13 @@
 
 - `src/main.rs`: Kernel-Einstieg und Bootstrap.
 - `src/scheduler.rs`: minimaler Task-Scheduler als Mikrokernel-Baustein.
+- `src/interrupts.rs`: IDT, PIC-Remapping, PIT-Timer und `int 0x80`-Syscall-Grenze.
 - `src/ipc.rs`: simple Message-Bus-Schnittstelle fuer spaetere Services.
 - `src/limine.rs`: Limine-Framebuffer-Request.
 - `src/framebuffer.rs`: Pixel- und Rechteck-Zeichenroutinen.
-- `src/desktop.rs`: erste GUI/Desktopansicht.
+- `src/services.rs` und `src/desktop.rs`: erste GUI-Service-Huelle und Desktopansicht.
+- `src/pci.rs` und `src/virtio.rs`: PCI-Scan und erste Virtio-Geraeteerkennung.
+- `src/userland.rs`: Adressraum-Modell und erster Syscall-Smoke-Test.
 
 ## Tools installieren
 
@@ -59,9 +62,24 @@ Oder unter Linux/WSL:
 ./scripts/build-limine.sh run
 ```
 
+## Virtio-Smoke-Test
+
+Mit einem Virtio-Blockgeraet und Virtio-Keyboard zeigt das Serial-Log erkannte Virtio-PCI-Geraete:
+
+```powershell
+$disk = "$PWD\build\virtio-test.img"
+[IO.File]::WriteAllBytes($disk, (New-Object byte[] 1048576))
+& "C:\Program Files\qemu\qemu-system-x86_64.exe" `
+  -M q35 -m 256M -cdrom .\build\nk.iso `
+  -drive "file=$disk,format=raw,if=none,id=vd0" `
+  -device virtio-blk-pci,drive=vd0 `
+  -device virtio-keyboard-pci `
+  -serial stdio
+```
+
 ## Naechste sinnvolle Schritte
 
-- Interrupts, Timer und ein echtes Preemptive Scheduling ergaenzen.
-- Userland-Adressraeume und Syscall-Grenze einfuehren.
-- Virtio-Treiber fuer Block- und Eingabegeraete bauen.
-- GUI-Service aus dem Kernel in einen isolierten Userland-Task verschieben.
+- Page-Table-Erzeugung fuer echte isolierte Userland-Adressraeume implementieren.
+- Ring-3-Task-Start mit TSS/IST und getrennten User-Stacks ergaenzen.
+- Virtio-Queues fuer Block- und Eingabegeraete initialisieren.
+- GUI-Service aus der Kernel-Huelle in einen isolierten Userland-Task verschieben.

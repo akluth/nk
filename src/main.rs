@@ -5,9 +5,14 @@ mod arch;
 mod desktop;
 mod framebuffer;
 mod ipc;
+mod interrupts;
 mod limine;
+mod pci;
 mod serial;
 mod scheduler;
+mod services;
+mod userland;
+mod virtio;
 
 use core::panic::PanicInfo;
 
@@ -18,7 +23,7 @@ pub extern "C" fn _start() -> ! {
 }
 
 mod microkernel {
-    use crate::{arch, desktop, ipc, limine, scheduler, serial};
+    use crate::{arch, interrupts, ipc, limine, scheduler, serial, services, userland, virtio};
 
     pub struct Kernel {
         scheduler: scheduler::Scheduler,
@@ -38,18 +43,23 @@ mod microkernel {
             serial::write_line("nk: kernel entered");
             self.scheduler.spawn("desktop");
             self.scheduler.spawn("idle");
+            scheduler::install(self.scheduler);
             self.ipc.publish(ipc::Message::new("kernel", "desktop", "paint"));
 
             if let Some(mut fb) = limine::framebuffer() {
                 serial::write_line("nk: framebuffer found");
-                desktop::Desktop::new().draw(&mut fb);
-                serial::write_line("nk: desktop painted");
+                services::gui::GuiService::new().run(&mut fb);
             } else {
                 serial::write_line("nk: no framebuffer response");
             }
 
+            interrupts::init();
+            serial::write_line("nk: interrupts enabled");
+            userland::init();
+            userland::smoke_test_syscall();
+            virtio::init();
+
             loop {
-                self.scheduler.tick();
                 arch::halt();
             }
         }
