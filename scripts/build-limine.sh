@@ -41,10 +41,29 @@ build_user_program() {
     "$ROOT/user/$name/src/main.rs"
 }
 
+build_c_user_program() {
+  local name="$1"
+  clang \
+    --target=x86_64-unknown-none \
+    -std=gnu89 \
+    -ffreestanding \
+    -fno-builtin \
+    -fno-stack-protector \
+    -mno-red-zone \
+    -nostdlib \
+    -c "$ROOT/user/$name/src/$name.c" \
+    -o "$BUILD/user/$name.o"
+  rust-lld \
+    -T "$ROOT/user/$name/linker.ld" \
+    -o "$BUILD/user/$name.elf" \
+    "$BUILD/user/$name.o"
+}
+
 build_user_program gui
 build_user_program shell
 build_user_program taskview
-python3 "$ROOT/scripts/make-fat32.py" "$BUILD/nk-apps.fat32" "$BUILD/user/gui.elf" "$BUILD/user/shell.elf" "$BUILD/user/taskview.elf"
+build_c_user_program cat
+python3 "$ROOT/scripts/make-fat32.py" "$BUILD/nk-apps.fat32" "$BUILD/user/gui.elf" "$BUILD/user/shell.elf" "$BUILD/user/taskview.elf" "$BUILD/user/cat.elf" "$ROOT/apps/HELLO.TXT"
 
 cp "$ROOT/target/x86_64-unknown-none/release/nk" "$ISO_ROOT/boot/nk"
 cp "$ROOT/limine.conf" "$ISO_ROOT/boot/limine.conf"

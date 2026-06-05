@@ -1,6 +1,6 @@
 use core::arch::global_asm;
 
-use crate::{arch, gdt, keyboard, mouse, scheduler, serial, services};
+use crate::{arch, gdt, keyboard, linux_abi, mouse, scheduler, serial, services};
 
 const IDT_ENTRIES: usize = 256;
 const GENERAL_PROTECTION_VECTOR: u8 = 13;
@@ -479,6 +479,10 @@ extern "C" fn rust_unhandled_interrupt(_frame: *mut scheduler::TrapFrame) {
 #[no_mangle]
 extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
     let frame = unsafe { &mut *frame };
+    if scheduler::current_user_name() == Some("cat") && linux_abi::handle_syscall(frame) {
+        return;
+    }
+
     match frame.rax {
         0 => {}
         16 => services::gui::clear(frame.rdi as u32),
@@ -541,6 +545,7 @@ fn packed_task_info(index: usize) -> u64 {
         "gui" => 1,
         "shell" => 2,
         "taskviewer" => 3,
+        "cat" => 4,
         _ => 0,
     };
     let mut flags = 0u64;

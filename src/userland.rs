@@ -190,6 +190,7 @@ pub fn install_first_task() {
     install_user_elf(0, "gui", b"GUI     ELF", true);
     install_user_elf(1, "shell", b"SHELL   ELF", false);
     install_user_elf(2, "taskviewer", b"TASKVIEWELF", false);
+    install_user_elf(3, "cat", b"CAT     ELF", false);
 }
 
 fn install_user_elf(index: usize, name: &'static str, fat_name: &[u8; 11], clear_image: bool) {

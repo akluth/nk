@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 
-const USER_TASKS: usize = 3;
+const USER_TASKS: usize = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -157,6 +157,33 @@ impl UserScheduler {
             current: index == self.current,
         })
     }
+
+    fn current_name(&self) -> Option<&'static str> {
+        if self.installed == 0 || !self.tasks[self.current].active {
+            None
+        } else {
+            Some(self.tasks[self.current].name)
+        }
+    }
+
+    fn exit_current(&mut self, frame: &mut TrapFrame) -> bool {
+        if self.installed == 0 {
+            return false;
+        }
+
+        self.tasks[self.current].active = false;
+        let mut next = (self.current + 1) % self.installed;
+        for _ in 0..self.installed {
+            if self.tasks[next].active {
+                self.current = next;
+                *frame = self.tasks[self.current].frame;
+                return true;
+            }
+            next = (next + 1) % self.installed;
+        }
+
+        false
+    }
 }
 
 struct GlobalScheduler(UnsafeCell<Option<Scheduler>>);
@@ -237,4 +264,12 @@ pub fn user_task_count() -> usize {
 
 pub fn user_task_info(index: usize) -> Option<UserTaskSnapshot> {
     unsafe { (*USER_SCHEDULER.0.get()).task_info(index) }
+}
+
+pub fn current_user_name() -> Option<&'static str> {
+    unsafe { (*USER_SCHEDULER.0.get()).current_name() }
+}
+
+pub fn exit_current_user(frame: &mut TrapFrame) -> bool {
+    unsafe { (*USER_SCHEDULER.0.get()).exit_current(frame) }
 }

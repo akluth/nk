@@ -60,6 +60,52 @@ function Build-UserProgram {
     }
 }
 
+function Build-CUserProgram {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Name
+    )
+
+    $Out = Join-Path $Build "user\$Name.elf"
+    $Obj = Join-Path $Build "user\$Name.o"
+    New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
+    $Clang = Get-Command clang -ErrorAction SilentlyContinue
+    if (-not $Clang -and (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) {
+        $Clang = @{ Source = "C:\Program Files\LLVM\bin\clang.exe" }
+    }
+    if (-not $Clang) {
+        throw "clang wurde nicht gefunden. Installiere LLVM, um user/$Name zu bauen."
+    }
+    $RustLld = Get-Command rust-lld -ErrorAction SilentlyContinue
+    if (-not $RustLld) {
+        $RustLld = Get-ChildItem "$env:USERPROFILE\.rustup\toolchains" -Recurse -Filter rust-lld.exe -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
+    if (-not $RustLld) {
+        throw "rust-lld wurde nicht gefunden."
+    }
+    $RustLldPath = if ($RustLld.Source) { $RustLld.Source } else { $RustLld.FullName }
+    Invoke-Checked $Clang.Source `
+        "--target=x86_64-unknown-none" `
+        "-std=gnu89" `
+        "-ffreestanding" `
+        "-fno-builtin" `
+        "-fno-stack-protector" `
+        "-mno-red-zone" `
+        "-nostdlib" `
+        "-c" `
+        (Join-Path $Root "user\$Name\src\$Name.c") `
+        "-o" `
+        $Obj
+    Invoke-Checked $RustLldPath `
+        "-flavor" `
+        "gnu" `
+        "-T" `
+        (Join-Path $Root "user\$Name\linker.ld") `
+        "-o" `
+        $Out `
+        $Obj
+}
+
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "cargo wurde nicht gefunden. Starte scripts\install-tools-admin.ps1 in einer Administrator-PowerShell."
 }
@@ -90,11 +136,14 @@ New-Item -ItemType Directory -Force -Path (Join-Path $IsoRoot "EFI\BOOT") | Out-
 Build-UserProgram "gui"
 Build-UserProgram "shell"
 Build-UserProgram "taskview"
+Build-CUserProgram "cat"
 Invoke-Checked python (Join-Path $Root "scripts\make-fat32.py") `
     (Join-Path $Build "nk-apps.fat32") `
     (Join-Path $Build "user\gui.elf") `
     (Join-Path $Build "user\shell.elf") `
-    (Join-Path $Build "user\taskview.elf")
+    (Join-Path $Build "user\taskview.elf") `
+    (Join-Path $Build "user\cat.elf") `
+    (Join-Path $Root "apps\HELLO.TXT")
 
 Copy-Item (Join-Path $Root "target\x86_64-unknown-none\release\nk") (Join-Path $IsoRoot "boot\nk")
 Copy-Item (Join-Path $Root "limine.conf") (Join-Path $IsoRoot "boot\limine.conf")

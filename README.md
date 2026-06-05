@@ -13,7 +13,7 @@ FAT32 application disk.
 - Starts Ring 3 tasks through `iretq` and saved trapframes.
 - Uses timer interrupt trapframes as scheduler context.
 - Builds a FAT32 application disk containing `GUI.ELF`, `SHELL.ELF`, and
-  `TASKVIEW.ELF`.
+  `TASKVIEW.ELF`, `CAT.ELF`, plus small data files.
 - Reads that FAT32 disk through a first ATA PIO block-device path.
 - Parses GUI, shell, and task viewer ELF files in the kernel and starts them as
   Ring 3 tasks.
@@ -22,6 +22,9 @@ FAT32 application disk.
 - Starts a passive userland GUI ELF that paints the desktop background.
 - Starts a second userland shell ELF with a single interactive shell window.
 - Starts a third userland task viewer ELF that displays the running user tasks.
+- Starts a fourth userland C `cat` ELF based on the original V7 UNIX `cat.c`
+  program body and prints a FAT32 file through a small Linux-like syscall
+  compatibility layer.
 - Delivers PS/2 keyboard input through IRQ1 and a small `read_key` syscall.
 - Delivers PS/2 mouse input through IRQ12 and a small `read_mouse` syscall.
 - Supports the initial shell commands `version` and `shutdown`.
@@ -43,6 +46,8 @@ FAT32 application disk.
   switch, and Ring 3 entry.
 - `src/services.rs`: kernel-side framebuffer service used by GUI syscalls.
 - `src/mouse.rs`: tiny PS/2 mouse packet decoder.
+- `src/linux_abi.rs`: first Linux-like syscall compatibility path for the C
+  `cat` process.
 - `src/framebuffer.rs`: low-level pixel and rectangle drawing.
 - `src/limine.rs`: Limine framebuffer, HHDM, and kernel address requests.
 - `src/pci.rs` and `src/virtio.rs`: PCI scan, Virtio capability discovery, and
@@ -53,6 +58,9 @@ FAT32 application disk.
 - `user/shell/linker.ld`: shell ELF linker script.
 - `user/taskview/src/main.rs`: separate no_std Rust task viewer executable.
 - `user/taskview/linker.ld`: task viewer ELF linker script.
+- `user/cat/src/cat.c`: separate C `cat` executable using the V7 UNIX `cat.c`
+  program body with a tiny local runtime.
+- `user/cat/linker.ld`: cat ELF linker script.
 
 ## Install Tools
 
@@ -91,10 +99,14 @@ The build script creates both:
 - `build/user/gui.elf`: the separate userland GUI executable.
 - `build/user/shell.elf`: the separate userland shell executable.
 - `build/user/taskview.elf`: the separate userland task viewer executable.
+- `build/user/cat.elf`: the separate userland C cat executable.
 - `build/nk-apps.fat32`: the FAT32 disk image containing the user programs.
 
 The ISO only contains the kernel and bootloader files. User programs are loaded
 from the FAT32 application disk at runtime.
+
+Building `cat.elf` requires `clang` and `rust-lld` because it is a C userland
+program rather than a Rust executable.
 
 ## Run in QEMU
 
@@ -145,6 +157,9 @@ $disk = "$PWD\build\virtio-test.img"
 - Add dirty-rectangle or double-buffered drawing to remove the remaining direct
   framebuffer redraw artifacts.
 - Replace the fixed user image buffer with per-process page allocation.
+- Replace the interim C runtime shim with enough Linux process ABI support to
+  execute unmodified static Linux binaries.
+- Add argv/envp/auxv setup on the initial user stack.
 - Split GUI syscalls into a proper capability-checked IPC protocol.
 - Move the FAT32 block backend from ATA PIO to Virtio block on `q35`.
 - Move more kernel-side services behind explicit userland/server boundaries.

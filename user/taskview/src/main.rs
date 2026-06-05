@@ -58,6 +58,7 @@ fn draw_task_row(x: u64, y: u64, info: u64) {
         1 => b"gui" as &[u8],
         2 => b"shell",
         3 => b"taskview",
+        4 => b"cat",
         _ => b"unknown",
     };
     let state = if current { b"running" as &[u8] } else { b"ready" };

@@ -9,6 +9,7 @@ mod gdt;
 mod ipc;
 mod interrupts;
 mod keyboard;
+mod linux_abi;
 mod limine;
 mod memory;
 mod mouse;

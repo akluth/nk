@@ -51,6 +51,10 @@ pub fn write_str(text: &str) {
     }
 }
 
+pub fn write_str_byte(byte: u8) {
+    write_byte(byte);
+}
+
 fn write_byte(byte: u8) {
     unsafe {
         while (arch::inb(COM1 + 5) & 0x20) == 0 {}

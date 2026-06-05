@@ -40,6 +40,39 @@ pub mod gui {
         }
     }
 
+    pub fn console_write(bytes: &[u8]) {
+        static mut CONSOLE_READY: bool = false;
+        static mut CONSOLE_X: usize = 184;
+        static mut CONSOLE_Y: usize = 520;
+
+        unsafe {
+            if !CONSOLE_READY {
+                rect(150, 468, 720, 210, 0x00f3f5f7);
+                rect(150, 468, 720, 40, 0x00343d4a);
+                rect(166, 481, 10, 10, 0x00ff605c);
+                rect(184, 481, 10, 10, 0x00ffbd44);
+                rect(202, 481, 10, 10, 0x0000ca4e);
+                let title = b"cat output";
+                text(234, 478, title.as_ptr(), title.len(), 0x00f3f5f7);
+                CONSOLE_READY = true;
+            }
+
+            for byte in bytes {
+                if *byte == b'\n' {
+                    CONSOLE_X = 184;
+                    CONSOLE_Y += 28;
+                    continue;
+                }
+                draw_char(CONSOLE_X, CONSOLE_Y, *byte, 0x00101820);
+                CONSOLE_X += 18;
+                if CONSOLE_X > 820 {
+                    CONSOLE_X = 184;
+                    CONSOLE_Y += 28;
+                }
+            }
+        }
+    }
+
     fn with_framebuffer(run: impl FnOnce(&mut Framebuffer)) {
         unsafe {
             if let Some(framebuffer) = (*FRAMEBUFFER.0.get()).as_mut() {
@@ -83,9 +116,11 @@ pub mod gui {
             b'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
             b'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010],
             b'a' => [0, 0b01110, 0b00001, 0b01111, 0b10001, 0b10011, 0b01101],
+            b'b' => [0b10000, 0b10000, 0b10110, 0b11001, 0b10001, 0b11001, 0b10110],
             b'c' => [0, 0b01110, 0b10001, 0b10000, 0b10000, 0b10001, 0b01110],
             b'd' => [0b00001, 0b00001, 0b01101, 0b10011, 0b10001, 0b10011, 0b01101],
             b'e' => [0, 0b01110, 0b10001, 0b11111, 0b10000, 0b10001, 0b01110],
+            b'f' => [0b00110, 0b01001, 0b01000, 0b11100, 0b01000, 0b01000, 0b01000],
             b'g' => [0, 0b01101, 0b10011, 0b10001, 0b01111, 0b00001, 0b01110],
             b'h' => [0b10000, 0b10000, 0b10110, 0b11001, 0b10001, 0b10001, 0b10001],
             b'i' => [0b00100, 0, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110],
@@ -101,6 +136,7 @@ pub mod gui {
             b'u' => [0, 0b10001, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
             b'v' => [0, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
             b'w' => [0, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010],
+            b'x' => [0, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0],
             b'y' => [0, 0b10001, 0b10001, 0b10011, 0b01101, 0b00001, 0b01110],
             _ => [0b11111, 0b10001, 0b10101, 0b10101, 0b10101, 0b10001, 0b11111],
         }

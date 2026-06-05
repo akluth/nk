@@ -87,6 +87,7 @@ static mut USER_IMAGE: UserImage = UserImage::empty();
 static mut USER_STACK_PAGE: UserPage = UserPage::empty();
 static mut USER_STACK_PAGE_1: UserPage = UserPage::empty();
 static mut USER_STACK_PAGE_2: UserPage = UserPage::empty();
+static mut USER_STACK_PAGE_3: UserPage = UserPage::empty();
 
 pub fn create_user_address_space(
     kernel: KernelAddress,
@@ -115,6 +116,7 @@ pub fn create_user_address_space(
         let user_stack_phys = page_phys(core::ptr::addr_of!(USER_STACK_PAGE), kernel);
         let user_stack_1_phys = page_phys(core::ptr::addr_of!(USER_STACK_PAGE_1), kernel);
         let user_stack_2_phys = page_phys(core::ptr::addr_of!(USER_STACK_PAGE_2), kernel);
+        let user_stack_3_phys = page_phys(core::ptr::addr_of!(USER_STACK_PAGE_3), kernel);
 
         let user_image_phys = virt_to_phys(core::ptr::addr_of!(USER_IMAGE) as u64, kernel);
         for page in 0..USER_IMAGE_PAGES {
@@ -145,6 +147,13 @@ pub fn create_user_address_space(
             user_pt,
             ((USER_STACK_BASE - USER_IMAGE_BASE) / PAGE_SIZE) as usize + 2,
             user_stack_2_phys,
+            PTE_USER | PTE_NO_EXECUTE,
+        );
+        map_page(
+            tables,
+            user_pt,
+            ((USER_STACK_BASE - USER_IMAGE_BASE) / PAGE_SIZE) as usize + 3,
+            user_stack_3_phys,
             PTE_USER | PTE_NO_EXECUTE,
         );
 
