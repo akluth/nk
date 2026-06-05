@@ -187,20 +187,32 @@ pub fn install_page_table_root(root: PageTableRoot) {
 }
 
 pub fn install_first_task() {
-    if let Some(gui) = crate::limine::module_named("gui") {
+    if let Some(gui) = crate::fat32::read_file(b"GUI     ELF") {
+        memory::clear_user_image();
         if let Some(entry) = load_elf(gui) {
-            let stack_top = memory::user_stack_top();
+            let stack_top = memory::user_stack_top(0);
             unsafe {
                 (*USER_ADDRESS_SPACE.0.get()).install_task(entry, stack_top);
             }
             install_task_frame(0, "gui", entry, stack_top);
             serial::write_line("nk: gui elf process installed");
-            return;
+        } else {
+            serial::write_line("nk: gui elf load failed");
         }
-
-        serial::write_line("nk: gui elf load failed");
     } else {
-        serial::write_line("nk: gui module missing");
+        serial::write_line("nk: gui elf missing on fat32");
+    }
+
+    if let Some(shell) = crate::fat32::read_file(b"SHELL   ELF") {
+        if let Some(entry) = load_elf(shell) {
+            let stack_top = memory::user_stack_top(1);
+            install_task_frame(1, "shell", entry, stack_top);
+            serial::write_line("nk: shell elf process installed");
+        } else {
+            serial::write_line("nk: shell elf load failed");
+        }
+    } else {
+        serial::write_line("nk: shell elf missing on fat32");
     }
 }
 
@@ -268,7 +280,6 @@ fn load_elf(image: &[u8]) -> Option<u64> {
         return None;
     }
 
-    memory::clear_user_image();
     for index in 0..phnum {
         let offset = phoff.checked_add(index.checked_mul(phentsize)?)?;
         if offset.checked_add(phentsize)? > image.len() {

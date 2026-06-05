@@ -8,7 +8,7 @@ const TABLE_COUNT: usize = 24;
 const KERNEL_MAPPED_PAGES: usize = 4096;
 const KERNEL_PT_COUNT: usize = (KERNEL_MAPPED_PAGES + PAGE_ENTRIES - 1) / PAGE_ENTRIES + 1;
 pub const USER_IMAGE_BASE: u64 = 0x0000_0000_4000_0000;
-pub const USER_IMAGE_SIZE: usize = 1024 * 1024;
+pub const USER_IMAGE_SIZE: usize = 1536 * 1024;
 pub const USER_IMAGE_PAGES: usize = USER_IMAGE_SIZE / PAGE_SIZE as usize;
 pub const USER_STACK_BASE: u64 = 0x0000_0000_4018_0000;
 
@@ -297,6 +297,6 @@ pub fn copy_user_segment(virt: u64, data: &[u8], mem_size: usize) -> bool {
     true
 }
 
-pub const fn user_stack_top() -> u64 {
-    USER_STACK_BASE + PAGE_SIZE * 2
+pub const fn user_stack_top(index: usize) -> u64 {
+    USER_STACK_BASE + PAGE_SIZE * (index as u64 + 1)
 }

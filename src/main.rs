@@ -2,6 +2,8 @@
 #![no_main]
 
 mod arch;
+mod ata;
+mod fat32;
 mod framebuffer;
 mod gdt;
 mod ipc;
@@ -24,7 +26,7 @@ pub extern "C" fn _start() -> ! {
 }
 
 mod microkernel {
-    use crate::{arch, gdt, interrupts, ipc, limine, memory, scheduler, serial, services, userland, virtio};
+    use crate::{arch, ata, fat32, gdt, interrupts, ipc, limine, memory, scheduler, serial, services, userland, virtio};
 
     pub struct Kernel {
         scheduler: scheduler::Scheduler,
@@ -77,6 +79,8 @@ mod microkernel {
             }
             userland::smoke_test_syscall();
             virtio::init();
+            ata::smoke_test();
+            fat32::smoke_test();
             if can_enter_user {
                 userland::install_first_task();
                 userland::start_first_task();

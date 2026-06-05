@@ -2,8 +2,8 @@
 
 `nk` is a tiny x86-64 operating system written in Rust. It boots through the
 Limine bootloader on BIOS and UEFI systems, brings up a small microkernel-style
-core, starts Ring 3 tasks, and now launches a minimal GUI as a separate ELF
-binary.
+core, starts Ring 3 tasks, and loads user programs as ELF files from a small
+FAT32 application disk.
 
 ## Current Status
 
@@ -12,11 +12,14 @@ binary.
 - Builds a dedicated userland page-table root.
 - Starts Ring 3 tasks through `iretq` and saved trapframes.
 - Uses timer interrupt trapframes as scheduler context.
-- Loads `/boot/gui.elf` as a Limine boot module.
-- Parses the GUI ELF in the kernel and starts it as a user process.
+- Builds a FAT32 application disk containing `GUI.ELF` and `SHELL.ELF`.
+- Reads that FAT32 disk through a first ATA PIO block-device path.
+- Parses GUI and shell ELF files in the kernel and starts them as Ring 3 tasks.
 - Provides minimal GUI syscalls for clearing the screen, drawing rectangles,
   and drawing tiny bitmap text.
 - Shows a movable "Hallo Welt!" window drawn by the userland GUI process.
+- Starts a second userland shell ELF that renders a small shell window with the
+  initial `version` and `shutdown` command surface.
 
 ## Architecture
 
@@ -28,16 +31,19 @@ binary.
   kernel-only framebuffer mapping for syscall handlers.
 - `src/scheduler.rs`: minimal kernel scheduler plus trapframe-based user task
   scheduling.
+- `src/ata.rs`: first ATA PIO sector reader for the QEMU FAT32 application disk.
+- `src/fat32.rs`: tiny FAT32 reader for 8.3 root-directory files.
 - `src/userland.rs`: address-space model, ELF loader, task frame setup, CR3
   switch, and Ring 3 entry.
 - `src/services.rs`: kernel-side framebuffer service used by GUI syscalls.
 - `src/framebuffer.rs`: low-level pixel and rectangle drawing.
-- `src/limine.rs`: Limine framebuffer, HHDM, kernel address, and module
-  requests.
+- `src/limine.rs`: Limine framebuffer, HHDM, and kernel address requests.
 - `src/pci.rs` and `src/virtio.rs`: PCI scan, Virtio capability discovery, and
   early queue memory setup.
 - `user/gui/src/main.rs`: separate no_std Rust GUI executable.
 - `user/gui/linker.ld`: GUI ELF linker script.
+- `user/shell/src/main.rs`: separate no_std Rust shell executable.
+- `user/shell/linker.ld`: shell ELF linker script.
 
 ## Install Tools
 
@@ -74,8 +80,11 @@ The build script creates both:
 
 - `target/x86_64-unknown-none/release/nk`: the kernel.
 - `build/user/gui.elf`: the separate userland GUI executable.
+- `build/user/shell.elf`: the separate userland shell executable.
+- `build/nk-apps.fat32`: the FAT32 disk image containing the user programs.
 
-Both files are copied into the ISO under `/boot`.
+The ISO only contains the kernel and bootloader files. User programs are loaded
+from the FAT32 application disk at runtime.
 
 ## Run in QEMU
 
@@ -84,6 +93,10 @@ Windows:
 ```powershell
 .\scripts\build-limine.ps1 -Run
 ```
+
+The BIOS run path uses QEMU's `pc` machine with an IDE disk because the current
+block reader is the intentionally small ATA PIO path. The app disk is attached
+automatically.
 
 UEFI test with edk2/OVMF from the QEMU installation:
 
@@ -117,7 +130,11 @@ $disk = "$PWD\build\virtio-test.img"
 
 - Add real input delivery so the userland GUI window can be dragged by mouse or
   keyboard instead of moving autonomously.
+- Add a compositor/window manager so GUI and shell windows no longer draw
+  directly into the shared framebuffer.
+- Wire keyboard input into the shell window and dispatch `version` and
+  `shutdown` interactively.
 - Replace the fixed user image buffer with per-process page allocation.
 - Split GUI syscalls into a proper capability-checked IPC protocol.
-- Register Virtio queues with devices and issue the first block/input requests.
+- Move the FAT32 block backend from ATA PIO to Virtio block on `q35`.
 - Move more kernel-side services behind explicit userland/server boundaries.
