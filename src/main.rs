@@ -8,6 +8,7 @@ mod framebuffer;
 mod gdt;
 mod ipc;
 mod interrupts;
+mod keyboard;
 mod limine;
 mod memory;
 mod pci;

@@ -18,15 +18,16 @@ FAT32 application disk.
 - Provides minimal GUI syscalls for clearing the screen, drawing rectangles,
   and drawing tiny bitmap text.
 - Shows a movable "Hallo Welt!" window drawn by the userland GUI process.
-- Starts a second userland shell ELF that renders a small shell window with the
-  initial `version` and `shutdown` command surface.
+- Starts a second userland shell ELF with a single interactive shell window.
+- Delivers PS/2 keyboard input through IRQ1 and a small `read_key` syscall.
+- Supports the initial shell commands `version` and `shutdown`.
 
 ## Architecture
 
 - `src/main.rs`: kernel entry and bootstrap sequence.
 - `src/gdt.rs`: GDT, kernel/user segments, TSS, and kernel stacks.
 - `src/interrupts.rs`: IDT, exception diagnostics, PIC/PIT setup, timer IRQs,
-  trapframe scheduling, and the `int 0x80` syscall boundary.
+  keyboard IRQs, trapframe scheduling, and the `int 0x80` syscall boundary.
 - `src/memory.rs`: user page-table creation, user image pages, user stacks, and
   kernel-only framebuffer mapping for syscall handlers.
 - `src/scheduler.rs`: minimal kernel scheduler plus trapframe-based user task
@@ -132,8 +133,8 @@ $disk = "$PWD\build\virtio-test.img"
   keyboard instead of moving autonomously.
 - Add a compositor/window manager so GUI and shell windows no longer draw
   directly into the shared framebuffer.
-- Wire keyboard input into the shell window and dispatch `version` and
-  `shutdown` interactively.
+- Add mouse input and a compositor so windows can be moved deliberately rather
+  than drawing directly into the shared framebuffer.
 - Replace the fixed user image buffer with per-process page allocation.
 - Split GUI syscalls into a proper capability-checked IPC protocol.
 - Move the FAT32 block backend from ATA PIO to Virtio block on `q35`.

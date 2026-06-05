@@ -1,11 +1,12 @@
 use core::arch::global_asm;
 
-use crate::{arch, gdt, scheduler, serial, services};
+use crate::{arch, gdt, keyboard, scheduler, serial, services};
 
 const IDT_ENTRIES: usize = 256;
 const GENERAL_PROTECTION_VECTOR: u8 = 13;
 const PAGE_FAULT_VECTOR: u8 = 14;
 const TIMER_VECTOR: u8 = 32;
+const KEYBOARD_VECTOR: u8 = 33;
 const SYSCALL_VECTOR: u8 = 0x80;
 
 const PIC1_COMMAND: u16 = 0x20;
@@ -78,6 +79,7 @@ extern "C" {
     fn isr_general_protection();
     fn isr_page_fault();
     fn isr_timer();
+    fn isr_keyboard();
     fn isr_syscall();
 }
 
@@ -215,6 +217,44 @@ isr_timer:
     pop rax
     iretq
 
+    .global isr_keyboard
+isr_keyboard:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8
+    cld
+    call rust_keyboard_interrupt
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
     .global isr_syscall
 isr_syscall:
     push rax
@@ -270,12 +310,15 @@ pub fn init() {
             .write(IdtEntry::new(isr_page_fault));
         idt.add(TIMER_VECTOR as usize)
             .write(IdtEntry::new(isr_timer));
+        idt.add(KEYBOARD_VECTOR as usize)
+            .write(IdtEntry::new(isr_keyboard));
         idt.add(SYSCALL_VECTOR as usize)
             .write(IdtEntry::new_user(isr_syscall));
         load_idt();
         remap_pic();
         configure_pit(TIMER_HZ);
         unmask_irq(0);
+        unmask_irq(1);
     }
 
     arch::enable_interrupts();
@@ -366,6 +409,15 @@ extern "C" fn rust_timer_interrupt(frame: *mut scheduler::TrapFrame) {
 }
 
 #[no_mangle]
+extern "C" fn rust_keyboard_interrupt() {
+    let scancode = unsafe { arch::inb(0x60) };
+    keyboard::push_scancode(scancode);
+    unsafe {
+        send_eoi(1);
+    }
+}
+
+#[no_mangle]
 extern "C" fn rust_unhandled_interrupt(_frame: *mut scheduler::TrapFrame) {
     serial::write_line("nk: unhandled interrupt");
 }
@@ -390,6 +442,15 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
             frame.r10 as usize,
             0x001a202c,
         ),
+        19 => {
+            frame.rax = keyboard::pop_key().unwrap_or(0) as u64;
+            return;
+        }
+        32 => unsafe {
+            serial::write_line("nk: shutdown requested");
+            arch::outw(0x604, 0x2000);
+            arch::outw(0xb004, 0x2000);
+        },
         id => {
             serial::write_str("nk: unknown syscall id=");
             serial::write_dec_u8(id as u8);
