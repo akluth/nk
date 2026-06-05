@@ -6,6 +6,7 @@ use core::{
 use crate::{
     gdt,
     memory::{self, PageTableRoot},
+    scheduler::{self, TrapFrame},
     serial,
 };
 
@@ -107,13 +108,6 @@ impl AddressSpace {
         self.root
     }
 
-    pub fn entry(&self) -> VirtAddr {
-        self.entry
-    }
-
-    pub fn stack_top(&self) -> VirtAddr {
-        self.stack_top
-    }
 }
 
 struct GlobalAddressSpace(UnsafeCell<AddressSpace>);
@@ -124,23 +118,44 @@ static USER_ADDRESS_SPACE: GlobalAddressSpace =
     GlobalAddressSpace(UnsafeCell::new(AddressSpace::new()));
 
 extern "C" {
-    fn enter_ring3(pml4: u64, entry: u64, stack: u64, code: u16, data: u16, kernel_stack: u64) -> !;
+    fn enter_ring3_frame(pml4: u64, frame: *const TrapFrame, kernel_stack: u64) -> !;
 }
 
 global_asm!(
     r#"
-    .global enter_ring3
-enter_ring3:
-    mov rsp, r9
-    mov cr3, rdi
-    push r8
-    push rdx
-    pushfq
-    pop rax
-    or rax, 0x200
+    .global enter_ring3_frame
+enter_ring3_frame:
+    mov rsp, rdx
+    push rdi
+    mov rax, [rsi + 112]
     push rax
-    push rcx
-    push rsi
+    mov rax, [rsi + 152]
+    push rax
+    mov rax, [rsi + 144]
+    push rax
+    mov rax, [rsi + 136]
+    push rax
+    mov rax, [rsi + 128]
+    push rax
+    mov rax, [rsi + 120]
+    push rax
+    mov r15, [rsi + 0]
+    mov r14, [rsi + 8]
+    mov r13, [rsi + 16]
+    mov r12, [rsi + 24]
+    mov r11, [rsi + 32]
+    mov r10, [rsi + 40]
+    mov r9, [rsi + 48]
+    mov r8, [rsi + 56]
+    mov rdi, [rsi + 64]
+    mov rbp, [rsi + 80]
+    mov rbx, [rsi + 88]
+    mov rdx, [rsi + 96]
+    mov rcx, [rsi + 104]
+    mov rsi, [rsi + 72]
+    mov rax, [rsp + 48]
+    mov cr3, rax
+    mov rax, [rsp + 40]
     iretq
 "#
 );
@@ -172,36 +187,73 @@ pub fn install_page_table_root(root: PageTableRoot) {
 }
 
 pub fn install_first_task() {
-    const USER_CODE: &[u8] = &[
+    const USER_CODE_0: &[u8] = &[
         0xb8, 0x00, 0x00, 0x00, 0x00, // mov eax, 0
         0xcd, 0x80, // int 0x80
         0xeb, 0xfe, // jmp $
     ];
+    const USER_CODE_1: &[u8] = &[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
+        0xcd, 0x80, // int 0x80
+        0xeb, 0xfe, // jmp $
+    ];
 
-    if let Some((entry, stack_top)) = memory::install_user_code(USER_CODE) {
+    if let Some((entry, stack_top)) = memory::install_user_code(0, USER_CODE_0) {
         unsafe {
             (*USER_ADDRESS_SPACE.0.get()).install_task(entry, stack_top);
         }
-        serial::write_line("nk: first ring3 task installed");
+        install_task_frame(0, "user0", entry, stack_top);
     }
+    if let Some((entry, stack_top)) = memory::install_user_code(1, USER_CODE_1) {
+        install_task_frame(1, "user1", entry, stack_top);
+    }
+
+    serial::write_line("nk: ring3 tasks installed");
 }
 
 pub fn start_first_task() -> ! {
     let address_space = unsafe { &mut *USER_ADDRESS_SPACE.0.get() };
     let root = address_space.root().expect("user page-table root missing");
-    let (code, data) = gdt::user_selectors();
+    let frame = scheduler::first_user_frame().expect("ring3 frame missing");
 
     serial::write_line("nk: entering ring3");
     unsafe {
-        enter_ring3(
+        enter_ring3_frame(
             root.pml4_phys(),
-            address_space.entry(),
-            address_space.stack_top(),
-            code,
-            data,
+            &frame,
             gdt::kernel_stack_top(),
         );
     }
+}
+
+fn install_task_frame(index: usize, name: &'static str, entry: VirtAddr, stack_top: VirtAddr) {
+    let (code, data) = gdt::user_selectors();
+    scheduler::install_user_task(
+        index,
+        name,
+        TrapFrame {
+            r15: 0,
+            r14: 0,
+            r13: 0,
+            r12: 0,
+            r11: 0,
+            r10: 0,
+            r9: 0,
+            r8: 0,
+            rdi: 0,
+            rsi: 0,
+            rbp: 0,
+            rbx: 0,
+            rdx: 0,
+            rcx: 0,
+            rax: 0,
+            rip: entry,
+            cs: code as u64,
+            rflags: 0x202,
+            rsp: stack_top,
+            ss: data as u64,
+        },
+    );
 }
 
 pub fn smoke_test_syscall() {

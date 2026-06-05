@@ -28,6 +28,13 @@ pub fn write_hex_u16(value: u16) {
     }
 }
 
+pub fn write_hex_u64(value: u64) {
+    write_str("0x");
+    for shift in (0..64).step_by(4).rev() {
+        write_nibble(((value >> shift) & 0xf) as u8);
+    }
+}
+
 pub fn write_dec_u8(value: u8) {
     if value >= 100 {
         write_byte(b'0' + value / 100);

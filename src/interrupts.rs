@@ -3,6 +3,8 @@ use core::arch::global_asm;
 use crate::{arch, gdt, scheduler, serial};
 
 const IDT_ENTRIES: usize = 256;
+const GENERAL_PROTECTION_VECTOR: u8 = 13;
+const PAGE_FAULT_VECTOR: u8 = 14;
 const TIMER_VECTOR: u8 = 32;
 const SYSCALL_VECTOR: u8 = 0x80;
 
@@ -69,9 +71,12 @@ struct IdtPointer {
 
 static mut IDT: [IdtEntry; IDT_ENTRIES] = [IdtEntry::missing(); IDT_ENTRIES];
 static mut TIMER_TICKS: u64 = 0;
+static mut USER_SWITCH_LOGS: u64 = 0;
 
 extern "C" {
     fn isr_default();
+    fn isr_general_protection();
+    fn isr_page_fault();
     fn isr_timer();
     fn isr_syscall();
 }
@@ -97,6 +102,7 @@ isr_default:
     push r15
     sub rsp, 8
     cld
+    lea rdi, [rsp + 8]
     call rust_unhandled_interrupt
     add rsp, 8
     pop r15
@@ -115,6 +121,60 @@ isr_default:
     pop rcx
     pop rax
     iretq
+
+    .global isr_general_protection
+isr_general_protection:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8
+    cld
+    mov rdi, 13
+    mov rsi, [rsp + 128]
+    xor rdx, rdx
+    call rust_fatal_exception
+1:
+    hlt
+    jmp 1b
+
+    .global isr_page_fault
+isr_page_fault:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8
+    cld
+    mov rdi, 14
+    mov rsi, [rsp + 128]
+    mov rdx, cr2
+    call rust_fatal_exception
+1:
+    hlt
+    jmp 1b
 
     .global isr_timer
 isr_timer:
@@ -135,6 +195,7 @@ isr_timer:
     push r15
     sub rsp, 8
     cld
+    lea rdi, [rsp + 8]
     call rust_timer_interrupt
     add rsp, 8
     pop r15
@@ -173,6 +234,7 @@ isr_syscall:
     push r15
     sub rsp, 8
     cld
+    lea rdi, [rsp + 8]
     call rust_syscall_interrupt
     add rsp, 8
     pop r15
@@ -202,6 +264,10 @@ pub fn init() {
         for index in 0..IDT_ENTRIES {
             idt.add(index).write(IdtEntry::new(isr_default));
         }
+        idt.add(GENERAL_PROTECTION_VECTOR as usize)
+            .write(IdtEntry::new(isr_general_protection));
+        idt.add(PAGE_FAULT_VECTOR as usize)
+            .write(IdtEntry::new(isr_page_fault));
         idt.add(TIMER_VECTOR as usize)
             .write(IdtEntry::new(isr_timer));
         idt.add(SYSCALL_VECTOR as usize)
@@ -278,12 +344,21 @@ unsafe fn io_wait() {
 }
 
 #[no_mangle]
-extern "C" fn rust_timer_interrupt() {
+extern "C" fn rust_timer_interrupt(frame: *mut scheduler::TrapFrame) {
     unsafe {
         TIMER_TICKS = TIMER_TICKS.wrapping_add(1);
         let scheduler_ticks = scheduler::tick();
         if TIMER_TICKS == 1 || TIMER_TICKS % 100 == 0 {
             serial::write_line("nk: timer interrupt");
+        }
+        if let Some(name) = scheduler::schedule_user(&mut *frame) {
+            USER_SWITCH_LOGS = USER_SWITCH_LOGS.wrapping_add(1);
+            if USER_SWITCH_LOGS > 16 && USER_SWITCH_LOGS % 100 != 0 {
+                send_eoi(0);
+                return;
+            }
+            serial::write_str("nk: switched to ");
+            serial::write_line(name);
         }
         let _ = scheduler_ticks;
         send_eoi(0);
@@ -291,11 +366,28 @@ extern "C" fn rust_timer_interrupt() {
 }
 
 #[no_mangle]
-extern "C" fn rust_unhandled_interrupt() {
+extern "C" fn rust_unhandled_interrupt(_frame: *mut scheduler::TrapFrame) {
     serial::write_line("nk: unhandled interrupt");
 }
 
 #[no_mangle]
-extern "C" fn rust_syscall_interrupt() {
-    serial::write_line("nk: syscall boundary crossed");
+extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
+    let syscall = unsafe { (*frame).rax };
+    serial::write_str("nk: syscall boundary crossed id=");
+    serial::write_dec_u8(syscall as u8);
+    serial::write_line("");
+}
+
+#[no_mangle]
+extern "C" fn rust_fatal_exception(vector: u64, error: u64, address: u64) -> ! {
+    serial::write_str("nk: fatal exception vector=");
+    serial::write_dec_u8(vector as u8);
+    serial::write_str(" error=");
+    serial::write_hex_u64(error);
+    serial::write_str(" addr=");
+    serial::write_hex_u64(address);
+    serial::write_line("");
+    loop {
+        arch::halt();
+    }
 }

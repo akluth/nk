@@ -4,10 +4,12 @@ use crate::{limine::KernelAddress, serial};
 
 const PAGE_SIZE: u64 = 4096;
 const PAGE_ENTRIES: usize = 512;
-const TABLE_COUNT: usize = 16;
-const KERNEL_MAPPED_PAGES: usize = 512;
+const TABLE_COUNT: usize = 24;
+const KERNEL_MAPPED_PAGES: usize = 4096;
+const KERNEL_PT_COUNT: usize = (KERNEL_MAPPED_PAGES + PAGE_ENTRIES - 1) / PAGE_ENTRIES + 1;
 pub const USER_CODE_VIRT: u64 = 0x0000_4000_0000;
-pub const USER_STACK_TOP: u64 = 0x0000_4000_3000;
+pub const USER_TASK_STRIDE: u64 = 0x0000_0000_0000_1000;
+pub const USER_STACK_BASE: u64 = 0x0000_4000_3000;
 
 const PTE_PRESENT: u64 = 1 << 0;
 const PTE_WRITABLE: u64 = 1 << 1;
@@ -60,7 +62,9 @@ impl UserPage {
 }
 
 static mut USER_CODE_PAGE: UserPage = UserPage::empty();
+static mut USER_CODE_PAGE_1: UserPage = UserPage::empty();
 static mut USER_STACK_PAGE: UserPage = UserPage::empty();
+static mut USER_STACK_PAGE_1: UserPage = UserPage::empty();
 
 pub fn create_user_address_space(kernel: KernelAddress) -> Option<PageTableRoot> {
     unsafe {
@@ -75,15 +79,18 @@ pub fn create_user_address_space(kernel: KernelAddress) -> Option<PageTableRoot>
         let user_pt = 3;
         let kernel_pdpt = 4;
         let kernel_pd = 5;
-        let kernel_pt = 6;
+        let kernel_pts = 6;
 
         link_table(tables, kernel, pml4, 0, pdpt, PTE_USER);
         link_table(tables, kernel, pdpt, 1, user_pd, PTE_USER);
         link_table(tables, kernel, user_pd, 0, user_pt, PTE_USER);
         let user_code_phys = page_phys(core::ptr::addr_of!(USER_CODE_PAGE), kernel);
+        let user_code_1_phys = page_phys(core::ptr::addr_of!(USER_CODE_PAGE_1), kernel);
         let user_stack_phys = page_phys(core::ptr::addr_of!(USER_STACK_PAGE), kernel);
+        let user_stack_1_phys = page_phys(core::ptr::addr_of!(USER_STACK_PAGE_1), kernel);
 
         map_page(tables, user_pt, 0, user_code_phys, PTE_USER);
+        map_page(tables, user_pt, 1, user_code_1_phys, PTE_USER);
         map_page(
             tables,
             user_pt,
@@ -91,17 +98,28 @@ pub fn create_user_address_space(kernel: KernelAddress) -> Option<PageTableRoot>
             user_stack_phys,
             PTE_USER | PTE_NO_EXECUTE,
         );
+        map_page(
+            tables,
+            user_pt,
+            4,
+            user_stack_1_phys,
+            PTE_USER | PTE_NO_EXECUTE,
+        );
 
         let (pml4_index, pdpt_index, pd_index, pt_index) = page_indexes(kernel.virtual_base);
         link_table(tables, kernel, pml4, pml4_index, kernel_pdpt, 0);
         link_table(tables, kernel, kernel_pdpt, pdpt_index, kernel_pd, 0);
-        link_table(tables, kernel, kernel_pd, pd_index, kernel_pt, 0);
+        for table in 0..KERNEL_PT_COUNT {
+            link_table(tables, kernel, kernel_pd, pd_index + table, kernel_pts + table, 0);
+        }
 
         for page in 0..KERNEL_MAPPED_PAGES {
+            let table = kernel_pts + ((pt_index + page) / PAGE_ENTRIES);
+            let entry = (pt_index + page) % PAGE_ENTRIES;
             map_page(
                 tables,
-                kernel_pt,
-                pt_index + page,
+                table,
+                entry,
                 kernel.physical_base + (page as u64 * PAGE_SIZE),
                 0,
             );
@@ -158,17 +176,24 @@ fn page_indexes(virt: u64) -> (usize, usize, usize, usize) {
     )
 }
 
-pub fn install_user_code(code: &[u8]) -> Option<(u64, u64)> {
+pub fn install_user_code(index: usize, code: &[u8]) -> Option<(u64, u64)> {
     if code.len() > PAGE_SIZE as usize {
         return None;
     }
 
     unsafe {
-        let page = &mut *core::ptr::addr_of_mut!(USER_CODE_PAGE);
+        let page = match index {
+            0 => &mut *core::ptr::addr_of_mut!(USER_CODE_PAGE),
+            1 => &mut *core::ptr::addr_of_mut!(USER_CODE_PAGE_1),
+            _ => return None,
+        };
         for byte in &mut page.bytes {
             *byte = 0x90;
         }
         page.bytes[..code.len()].copy_from_slice(code);
-        Some((USER_CODE_VIRT, USER_STACK_TOP))
+        Some((
+            USER_CODE_VIRT + (index as u64 * USER_TASK_STRIDE),
+            USER_STACK_BASE + (index as u64 * 0x2000),
+        ))
     }
 }

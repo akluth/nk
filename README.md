@@ -5,16 +5,25 @@
 ## Architektur
 
 - `src/main.rs`: Kernel-Einstieg und Bootstrap.
-- `src/scheduler.rs`: minimaler Task-Scheduler als Mikrokernel-Baustein.
-- `src/interrupts.rs`: IDT, PIC-Remapping, PIT-Timer und `int 0x80`-Syscall-Grenze.
+- `src/scheduler.rs`: minimaler Kernel-Scheduler plus Trapframe-basierter Round-Robin-Scheduler fuer Ring-3-Tasks.
+- `src/interrupts.rs`: IDT, PIC-Remapping, PIT-Timer, Exception-Diagnose und `int 0x80`-Syscall-Grenze.
 - `src/ipc.rs`: simple Message-Bus-Schnittstelle fuer spaetere Services.
 - `src/limine.rs`: Limine-Framebuffer-Request.
 - `src/framebuffer.rs`: Pixel- und Rechteck-Zeichenroutinen.
 - `src/services.rs` und `src/desktop.rs`: erste GUI-Service-Huelle und Desktopansicht.
 - `src/gdt.rs`: GDT, Kernel/User-Segmente, TSS und erste IST/Kern-Stacks.
-- `src/memory.rs`: Page-Table-Erzeugung fuer einen isolierbaren Userland-Adressraum samt User-Code- und User-Stack-Seite.
+- `src/memory.rs`: Page-Table-Erzeugung fuer einen isolierbaren Userland-Adressraum samt mehreren User-Code- und User-Stack-Seiten.
 - `src/pci.rs` und `src/virtio.rs`: PCI-Scan, Virtio-Capabilities und erste Queue-Speicher.
-- `src/userland.rs`: Adressraum-Modell, Page-Table-Root, erster `CR3`-Wechsel und `iretq`-Start nach Ring 3.
+- `src/userland.rs`: Adressraum-Modell, Page-Table-Root, `CR3`-Wechsel und `iretq`-Start mehrerer Ring-3-Tasks.
+
+## Aktueller Kernel-Status
+
+- Startet unter QEMU ueber Limine/BIOS.
+- Initialisiert GDT/TSS, IDT, PIC und PIT.
+- Baut einen eigenen Userland-Page-Table-Root.
+- Startet zwei Ring-3-Tasks mit getrennten Code- und Stack-Seiten.
+- Nutzt Timer-Interrupt-Trapframes als Scheduler-Kontext und wechselt beide User-Tasks preemptiv.
+- Erreicht die Syscall-Grenze via `int 0x80` aus Ring 3.
 
 ## Tools installieren
 
@@ -81,7 +90,7 @@ $disk = "$PWD\build\virtio-test.img"
 
 ## Naechste sinnvolle Schritte
 
-- Trap-Frames als Scheduler-Kontext modellieren und mehrere Ring-3-Tasks preemptiv wechseln.
 - Virtio-Queues in den Geraeten registrieren und erste Block/Input-Requests ausfuehren.
 - Framebuffer oder GUI-IPC als kontrollierte Userland-Schnittstelle definieren.
+- Einen echten Syscall-Dispatcher mit User-Pointern, Fehlercodes und Kernel-Objektrechten bauen.
 - GUI-Service aus der Kernel-Huelle in einen echten isolierten Userland-Task mit eigener Message-Loop verschieben.
