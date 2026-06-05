@@ -97,9 +97,32 @@ Copy-Item (Join-Path $Limine "BOOTIA32.EFI") (Join-Path $IsoRoot "EFI\BOOT\BOOTI
 $Iso = Join-Path $Build "nk.iso"
 $Xorriso = Get-Command xorriso -ErrorAction SilentlyContinue
 if ($Xorriso) {
-    Invoke-Checked $Xorriso.Source -as mkisofs -b limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table `
-        --efi-boot limine-uefi-cd.bin -efi-boot-part --efi-boot-image --protective-msdos-label `
-        $IsoRoot -o $Iso
+    $XorrisoIsoRoot = $IsoRoot
+    $XorrisoIso = $Iso
+    if ($Xorriso.Source -like "$MsysBash\..\*") {
+        $XorrisoIsoRoot = ConvertTo-MsysPath $IsoRoot
+        $XorrisoIso = ConvertTo-MsysPath $Iso
+    } elseif ($Xorriso.Source -like "C:\tools\msys64\*") {
+        $XorrisoIsoRoot = ConvertTo-MsysPath $IsoRoot
+        $XorrisoIso = ConvertTo-MsysPath $Iso
+    }
+    $XorrisoArgs = @(
+        "-as", "mkisofs",
+        "-b", "limine-bios-cd.bin",
+        "-no-emul-boot",
+        "-boot-load-size", "4",
+        "-boot-info-table",
+        "--efi-boot", "limine-uefi-cd.bin",
+        "-efi-boot-part",
+        "--efi-boot-image",
+        "--protective-msdos-label",
+        $XorrisoIsoRoot,
+        "-o", $XorrisoIso
+    )
+    & $Xorriso.Source @XorrisoArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "$($Xorriso.Source) failed with exit code $LASTEXITCODE"
+    }
 } elseif (Test-Path $MsysBash) {
     $MsysIsoRoot = ConvertTo-MsysPath $IsoRoot
     $MsysIso = ConvertTo-MsysPath $Iso
