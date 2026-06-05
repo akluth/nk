@@ -1,12 +1,13 @@
 use core::arch::global_asm;
 
-use crate::{arch, gdt, keyboard, scheduler, serial, services};
+use crate::{arch, gdt, keyboard, mouse, scheduler, serial, services};
 
 const IDT_ENTRIES: usize = 256;
 const GENERAL_PROTECTION_VECTOR: u8 = 13;
 const PAGE_FAULT_VECTOR: u8 = 14;
 const TIMER_VECTOR: u8 = 32;
 const KEYBOARD_VECTOR: u8 = 33;
+const MOUSE_VECTOR: u8 = 44;
 const SYSCALL_VECTOR: u8 = 0x80;
 
 const PIC1_COMMAND: u16 = 0x20;
@@ -80,6 +81,7 @@ extern "C" {
     fn isr_page_fault();
     fn isr_timer();
     fn isr_keyboard();
+    fn isr_mouse();
     fn isr_syscall();
 }
 
@@ -255,6 +257,44 @@ isr_keyboard:
     pop rax
     iretq
 
+    .global isr_mouse
+isr_mouse:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8
+    cld
+    call rust_mouse_interrupt
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
     .global isr_syscall
 isr_syscall:
     push rax
@@ -312,13 +352,18 @@ pub fn init() {
             .write(IdtEntry::new(isr_timer));
         idt.add(KEYBOARD_VECTOR as usize)
             .write(IdtEntry::new(isr_keyboard));
+        idt.add(MOUSE_VECTOR as usize)
+            .write(IdtEntry::new(isr_mouse));
         idt.add(SYSCALL_VECTOR as usize)
             .write(IdtEntry::new_user(isr_syscall));
         load_idt();
         remap_pic();
         configure_pit(TIMER_HZ);
+        mouse::init();
         unmask_irq(0);
         unmask_irq(1);
+        unmask_irq(2);
+        unmask_irq(12);
     }
 
     arch::enable_interrupts();
@@ -418,6 +463,15 @@ extern "C" fn rust_keyboard_interrupt() {
 }
 
 #[no_mangle]
+extern "C" fn rust_mouse_interrupt() {
+    let byte = unsafe { arch::inb(0x60) };
+    mouse::push_byte(byte);
+    unsafe {
+        send_eoi(12);
+    }
+}
+
+#[no_mangle]
 extern "C" fn rust_unhandled_interrupt(_frame: *mut scheduler::TrapFrame) {
     serial::write_line("nk: unhandled interrupt");
 }
@@ -446,6 +500,17 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
             frame.rax = keyboard::pop_key().unwrap_or(0) as u64;
             return;
         }
+        20 => {
+            frame.rax = mouse::packed_state();
+            return;
+        }
+        21 => services::gui::text(
+            frame.rdi as usize,
+            frame.rsi as usize,
+            frame.rdx as *const u8,
+            frame.r10 as usize,
+            frame.r8 as u32,
+        ),
         32 => unsafe {
             serial::write_line("nk: shutdown requested");
             arch::outw(0x604, 0x2000);

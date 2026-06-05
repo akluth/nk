@@ -11,6 +11,7 @@ mod interrupts;
 mod keyboard;
 mod limine;
 mod memory;
+mod mouse;
 mod pci;
 mod serial;
 mod scheduler;
