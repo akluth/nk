@@ -1,0 +1,6 @@
+/target/
+/build/
+/third_party/
+*.iso
+*.img
+*.log
