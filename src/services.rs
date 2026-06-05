@@ -11,6 +11,9 @@ pub mod gui {
     unsafe impl Sync for GlobalFramebuffer {}
 
     static FRAMEBUFFER: GlobalFramebuffer = GlobalFramebuffer(UnsafeCell::new(None));
+    static mut CONSOLE_READY: bool = false;
+    static mut CONSOLE_X: usize = 184;
+    static mut CONSOLE_Y: usize = 520;
 
     pub fn install(framebuffer: Framebuffer) {
         unsafe {
@@ -41,10 +44,6 @@ pub mod gui {
     }
 
     pub fn console_write(bytes: &[u8]) {
-        static mut CONSOLE_READY: bool = false;
-        static mut CONSOLE_X: usize = 184;
-        static mut CONSOLE_Y: usize = 520;
-
         unsafe {
             if !CONSOLE_READY {
                 rect(150, 468, 720, 210, 0x00f3f5f7);
@@ -70,6 +69,14 @@ pub mod gui {
                     CONSOLE_Y += 28;
                 }
             }
+        }
+    }
+
+    pub fn reset_console() {
+        unsafe {
+            CONSOLE_READY = false;
+            CONSOLE_X = 184;
+            CONSOLE_Y = 520;
         }
     }
 

@@ -53,6 +53,7 @@ fn draw() {
 fn draw_task_row(x: u64, y: u64, info: u64) {
     let name_id = info & 0xff;
     let flags = (info >> 8) & 0xff;
+    let active = flags & 1 != 0;
     let current = flags & 2 != 0;
     let name = match name_id {
         1 => b"gui" as &[u8],
@@ -61,7 +62,13 @@ fn draw_task_row(x: u64, y: u64, info: u64) {
         4 => b"cat",
         _ => b"unknown",
     };
-    let state = if current { b"running" as &[u8] } else { b"ready" };
+    let state = if current {
+        b"running" as &[u8]
+    } else if active {
+        b"ready"
+    } else {
+        b"sleep"
+    };
     let color = if current { ACCENT } else { INK };
     text_bytes(x, y, name, color);
     text_bytes(x + 162, y, state, color);

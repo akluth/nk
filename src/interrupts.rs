@@ -523,6 +523,11 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
             frame.rax = packed_task_info(frame.rdi as usize);
             return;
         }
+        24 => {
+            services::gui::reset_console();
+            frame.rax = if scheduler::restart_user_task("cat") { 0 } else { 1 };
+            return;
+        }
         32 => unsafe {
             serial::write_line("nk: shutdown requested");
             arch::outw(0x604, 0x2000);

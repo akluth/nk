@@ -8,6 +8,7 @@ const SYS_GUI_RECT: u64 = 17;
 const SYS_GUI_TEXT_COLOR: u64 = 21;
 const SYS_READ_KEY: u64 = 19;
 const SYS_READ_MOUSE: u64 = 20;
+const SYS_RUN_CAT: u64 = 24;
 const SYS_SHUTDOWN: u64 = 32;
 
 const BG: u32 = 0x00191d24;
@@ -25,6 +26,7 @@ const CURSOR: u32 = 0x00ffbd44;
 enum Output {
     Ready,
     Version,
+    Cat,
     Shutdown,
     Unknown,
 }
@@ -104,6 +106,9 @@ pub extern "C" fn _start() -> ! {
 fn run_command(command: &[u8]) -> Output {
     if command == b"version" {
         Output::Version
+    } else if command == b"cat" {
+        syscall0(SYS_RUN_CAT);
+        Output::Cat
     } else if command == b"shutdown" {
         syscall0(SYS_SHUTDOWN);
         Output::Shutdown
@@ -135,7 +140,7 @@ fn draw_shell(x: u64, y: u64, input: &[u8; 32], len: usize, output: Output) {
     rect(x + 52, y + 13, 10, 10, 0x0000ca4e);
     text(x + 84, y + 10, b"nk shell", LIGHT);
 
-    text(x + 34, y + 76, b"type: version  or  shutdown", MUTED);
+    text(x + 34, y + 76, b"type: version  cat  shutdown", MUTED);
     text(x + 34, y + 132, b">", ACCENT);
     text_bytes(x + 70, y + 132, &input[..len], INK);
     rect(x + 70 + len as u64 * 18, y + 154, 14, 4, ACCENT);
@@ -143,6 +148,7 @@ fn draw_shell(x: u64, y: u64, input: &[u8; 32], len: usize, output: Output) {
     match output {
         Output::Ready => text(x + 34, y + 210, b"ready", MUTED),
         Output::Version => text(x + 34, y + 210, b"nk 0.1.0", INK),
+        Output::Cat => text(x + 34, y + 210, b"cat started", INK),
         Output::Shutdown => text(x + 34, y + 210, b"shutting down", INK),
         Output::Unknown => text(x + 34, y + 210, b"unknown command", INK),
     }

@@ -41,37 +41,41 @@ pub struct Scheduler {
 #[derive(Clone, Copy)]
 struct UserTask {
     name: &'static str,
+    initial_frame: TrapFrame,
     frame: TrapFrame,
     ticks: u64,
     active: bool,
 }
 
 impl UserTask {
+    const EMPTY_FRAME: TrapFrame = TrapFrame {
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        r11: 0,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rdi: 0,
+        rsi: 0,
+        rbp: 0,
+        rbx: 0,
+        rdx: 0,
+        rcx: 0,
+        rax: 0,
+        rip: 0,
+        cs: 0,
+        rflags: 0,
+        rsp: 0,
+        ss: 0,
+    };
+
     const fn empty() -> Self {
         Self {
             name: "",
-            frame: TrapFrame {
-                r15: 0,
-                r14: 0,
-                r13: 0,
-                r12: 0,
-                r11: 0,
-                r10: 0,
-                r9: 0,
-                r8: 0,
-                rdi: 0,
-                rsi: 0,
-                rbp: 0,
-                rbx: 0,
-                rdx: 0,
-                rcx: 0,
-                rax: 0,
-                rip: 0,
-                cs: 0,
-                rflags: 0,
-                rsp: 0,
-                ss: 0,
-            },
+            initial_frame: Self::EMPTY_FRAME,
+            frame: Self::EMPTY_FRAME,
             ticks: 0,
             active: false,
         }
@@ -107,6 +111,7 @@ impl UserScheduler {
 
         self.tasks[index] = UserTask {
             name,
+            initial_frame: frame,
             frame,
             ticks: 0,
             active: true,
@@ -184,6 +189,24 @@ impl UserScheduler {
 
         false
     }
+
+    fn set_active(&mut self, index: usize, active: bool) {
+        if index >= self.installed {
+            return;
+        }
+        self.tasks[index].active = active;
+    }
+
+    fn restart_by_name(&mut self, name: &'static str) -> bool {
+        for index in 0..self.installed {
+            if self.tasks[index].name == name {
+                self.tasks[index].frame = self.tasks[index].initial_frame;
+                self.tasks[index].active = true;
+                return true;
+            }
+        }
+        false
+    }
 }
 
 struct GlobalScheduler(UnsafeCell<Option<Scheduler>>);
@@ -250,6 +273,12 @@ pub fn install_user_task(index: usize, name: &'static str, frame: TrapFrame) {
     }
 }
 
+pub fn set_user_task_active(index: usize, active: bool) {
+    unsafe {
+        (*USER_SCHEDULER.0.get()).set_active(index, active);
+    }
+}
+
 pub fn first_user_frame() -> Option<TrapFrame> {
     unsafe { (*USER_SCHEDULER.0.get()).first_frame() }
 }
@@ -272,4 +301,8 @@ pub fn current_user_name() -> Option<&'static str> {
 
 pub fn exit_current_user(frame: &mut TrapFrame) -> bool {
     unsafe { (*USER_SCHEDULER.0.get()).exit_current(frame) }
+}
+
+pub fn restart_user_task(name: &'static str) -> bool {
+    unsafe { (*USER_SCHEDULER.0.get()).restart_by_name(name) }
 }

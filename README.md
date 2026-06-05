@@ -27,7 +27,9 @@ FAT32 application disk.
   compatibility layer.
 - Delivers PS/2 keyboard input through IRQ1 and a small `read_key` syscall.
 - Delivers PS/2 mouse input through IRQ12 and a small `read_mouse` syscall.
-- Supports the initial shell commands `version` and `shutdown`.
+- Supports the shell commands `version`, `cat`, and `shutdown`.
+- The `cat` command starts the separate `CAT.ELF` user task on demand; that
+  program reads `/HELLO.TXT` from the FAT32 application disk.
 
 ## Architecture
 
