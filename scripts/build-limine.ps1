@@ -110,8 +110,8 @@ function Ensure-BashProgram {
     $BashPortElf = Join-Path $Root "third_party\bash-5.3\bash"
     $BashOut = Join-Path $Build "user\bash.elf"
     if (-not (Test-Path $BashPortElf)) {
-        Invoke-Checked powershell -ExecutionPolicy Bypass -File (Join-Path $Root "ports\bash\fetch-bash.ps1")
-        Invoke-Checked powershell -ExecutionPolicy Bypass -File (Join-Path $Root "ports\bash\build-bash.ps1")
+        Invoke-Checked -FilePath powershell -Arguments @("-ExecutionPolicy", "Bypass", "-File", (Join-Path $Root "ports\bash\fetch-bash.ps1"))
+        Invoke-Checked -FilePath powershell -Arguments @("-ExecutionPolicy", "Bypass", "-File", (Join-Path $Root "ports\bash\build-bash.ps1"))
     }
     if (-not (Test-Path $BashPortElf)) {
         throw "Bash wurde nicht gebaut. Erwartet: $BashPortElf"
