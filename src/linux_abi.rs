@@ -1,19 +1,28 @@
 use core::cell::UnsafeCell;
 
-use crate::{fat32, keyboard, scheduler, serial, services};
+use crate::{arch, fat32, keyboard, scheduler, serial, services};
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
+const SYS_STAT: u64 = 4;
 const SYS_FSTAT: u64 = 5;
+const SYS_MMAP: u64 = 9;
+const SYS_MUNMAP: u64 = 11;
 const SYS_LSEEK: u64 = 8;
 const SYS_RT_SIGACTION: u64 = 13;
 const SYS_RT_SIGPROCMASK: u64 = 14;
 const SYS_IOCTL: u64 = 16;
+const SYS_WRITEV: u64 = 20;
 const SYS_ACCESS: u64 = 21;
+const SYS_FCNTL: u64 = 72;
 const SYS_GETCWD: u64 = 79;
 const SYS_CHDIR: u64 = 80;
+const SYS_GETTIMEOFDAY: u64 = 96;
+const SYS_GETRESUID: u64 = 118;
+const SYS_GETRESGID: u64 = 120;
+const SYS_READLINK: u64 = 89;
 const SYS_GETUID: u64 = 102;
 const SYS_GETGID: u64 = 104;
 const SYS_GETEUID: u64 = 107;
@@ -23,8 +32,10 @@ const SYS_ARCH_PRCTL: u64 = 158;
 const SYS_SET_TID_ADDRESS: u64 = 218;
 const SYS_BRK: u64 = 12;
 const SYS_GETPID: u64 = 39;
+const SYS_WAIT4: u64 = 61;
 const SYS_UNAME: u64 = 63;
 const SYS_EXIT: u64 = 60;
+const SYS_CLOCK_GETTIME: u64 = 228;
 const SYS_OPENAT: u64 = 257;
 const SYS_EXIT_GROUP: u64 = 231;
 const SYS_SET_ROBUST_LIST: u64 = 273;
@@ -32,12 +43,19 @@ const SYS_NEWFSTATAT: u64 = 262;
 const SYS_PRLIMIT64: u64 = 302;
 const SYS_GETRANDOM: u64 = 318;
 
+const ARCH_SET_FS: u64 = 0x1002;
+const ARCH_GET_FS: u64 = 0x1003;
+const IA32_FS_BASE: u32 = 0xc000_0100;
+
 const EBADF: i64 = -9;
+const ECHILD: i64 = -10;
 const ENOENT: i64 = -2;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 const ENOSYS: i64 = -38;
 
+const USER_MMAP_START: u64 = 0x0000_0000_4010_0000;
+const USER_MMAP_END: u64 = 0x0000_0000_4017_0000;
 const USER_BRK_START: u64 = 0x0000_0000_4017_0000;
 const USER_BRK_END: u64 = 0x0000_0000_4017_f000;
 
@@ -60,7 +78,9 @@ struct GlobalOpenFile(UnsafeCell<OpenFile>);
 unsafe impl Sync for GlobalOpenFile {}
 
 static FILE3: GlobalOpenFile = GlobalOpenFile(UnsafeCell::new(OpenFile::empty()));
+static mut MMAP_CURSOR: u64 = USER_MMAP_START;
 static mut PROGRAM_BREAK: u64 = USER_BRK_START;
+static mut UNKNOWN_LOGS: u64 = 0;
 
 pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
     match frame.rax {
@@ -80,12 +100,24 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = close(frame.rdi as i32) as u64;
             true
         }
+        SYS_STAT => {
+            frame.rax = stat_path(frame.rdi as *const u8, frame.rsi as *mut u8) as u64;
+            true
+        }
         SYS_FSTAT => {
             frame.rax = stat_fd(frame.rdi as i32, frame.rsi as *mut u8) as u64;
             true
         }
         SYS_LSEEK => {
             frame.rax = lseek(frame.rdi as i32, frame.rsi as i64, frame.rdx as i32) as u64;
+            true
+        }
+        SYS_MMAP => {
+            frame.rax = mmap(frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8 as i64) as u64;
+            true
+        }
+        SYS_MUNMAP => {
+            frame.rax = 0;
             true
         }
         SYS_RT_SIGACTION | SYS_RT_SIGPROCMASK => {
@@ -96,8 +128,16 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = ioctl(frame.rdi as i32, frame.rsi, frame.rdx as *mut u8) as u64;
             true
         }
+        SYS_WRITEV => {
+            frame.rax = writev(frame.rdi as i32, frame.rsi as *const u8, frame.rdx as usize) as u64;
+            true
+        }
         SYS_ACCESS => {
             frame.rax = access(frame.rdi as *const u8) as u64;
+            true
+        }
+        SYS_FCNTL => {
+            frame.rax = fcntl(frame.rdi as i32, frame.rsi, frame.rdx) as u64;
             true
         }
         SYS_BRK => {
@@ -112,12 +152,36 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = uname(frame.rdi as *mut u8) as u64;
             true
         }
+        SYS_WAIT4 => {
+            frame.rax = ECHILD as u64;
+            true
+        }
         SYS_GETCWD => {
             frame.rax = getcwd(frame.rdi as *mut u8, frame.rsi as usize) as u64;
             true
         }
+        SYS_GETTIMEOFDAY => {
+            frame.rax = gettimeofday(frame.rdi as *mut u8) as u64;
+            true
+        }
+        SYS_GETRESUID | SYS_GETRESGID => {
+            frame.rax = write_three_ids(
+                frame.rdi as *mut u32,
+                frame.rsi as *mut u32,
+                frame.rdx as *mut u32,
+            ) as u64;
+            true
+        }
         SYS_CHDIR => {
             frame.rax = chdir(frame.rdi as *const u8) as u64;
+            true
+        }
+        SYS_READLINK => {
+            frame.rax = readlink(
+                frame.rdi as *const u8,
+                frame.rsi as *mut u8,
+                frame.rdx as usize,
+            ) as u64;
             true
         }
         SYS_GETUID | SYS_GETGID | SYS_GETEUID | SYS_GETEGID => {
@@ -128,7 +192,11 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = 1;
             true
         }
-        SYS_ARCH_PRCTL | SYS_SET_ROBUST_LIST => {
+        SYS_ARCH_PRCTL => {
+            frame.rax = arch_prctl(frame.rdi, frame.rsi) as u64;
+            true
+        }
+        SYS_SET_ROBUST_LIST => {
             frame.rax = 0;
             true
         }
@@ -144,6 +212,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
         SYS_EXIT_GROUP => {
             serial::write_line("nk: linux task exited");
             let _scheduled = scheduler::exit_current_user(frame);
+            true
+        }
+        SYS_CLOCK_GETTIME => {
+            frame.rax = clock_gettime(frame.rsi as *mut u8) as u64;
             true
         }
         SYS_OPENAT => {
@@ -163,6 +235,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         _ => {
+            log_unknown_syscall(frame.rax);
             frame.rax = ENOSYS as u64;
             true
         }
@@ -250,6 +323,28 @@ fn write(fd: i32, buffer: *const u8, len: usize) -> i64 {
     len as i64
 }
 
+fn writev(fd: i32, iov: *const u8, count: usize) -> i64 {
+    if iov.is_null() {
+        return EFAULT;
+    }
+    if count > 16 {
+        return EINVAL;
+    }
+
+    let mut total = 0i64;
+    for index in 0..count {
+        let base_offset = index * 16;
+        let base = unsafe { read_user_u64(iov.add(base_offset)) } as *const u8;
+        let len = unsafe { read_user_u64(iov.add(base_offset + 8)) } as usize;
+        let written = write(fd, base, len);
+        if written < 0 {
+            return written;
+        }
+        total += written;
+    }
+    total
+}
+
 fn close(fd: i32) -> i64 {
     if fd == 3 {
         unsafe {
@@ -288,6 +383,16 @@ fn lseek(fd: i32, offset: i64, whence: i32) -> i64 {
     }
 }
 
+fn fcntl(fd: i32, command: u64, _arg: u64) -> i64 {
+    if fd != 0 && fd != 1 && fd != 2 && fd != 3 {
+        return EBADF;
+    }
+    match command {
+        1 | 2 | 3 => 0,
+        _ => 0,
+    }
+}
+
 fn brk(request: u64) -> i64 {
     unsafe {
         if request == 0 {
@@ -297,6 +402,33 @@ fn brk(request: u64) -> i64 {
             PROGRAM_BREAK = request;
         }
         PROGRAM_BREAK as i64
+    }
+}
+
+fn mmap(address: u64, len: u64, _prot: u64, flags: u64, fd: i64) -> i64 {
+    const MAP_FIXED: u64 = 0x10;
+    const MAP_ANONYMOUS: u64 = 0x20;
+
+    if len == 0 {
+        return EINVAL;
+    }
+    if fd != -1 && flags & MAP_ANONYMOUS == 0 {
+        return EINVAL;
+    }
+
+    let aligned_len = (len + 4095) & !4095;
+    unsafe {
+        let base = if flags & MAP_FIXED != 0 && address != 0 {
+            address
+        } else {
+            let next = (MMAP_CURSOR + 4095) & !4095;
+            MMAP_CURSOR = next.saturating_add(aligned_len);
+            next
+        };
+        if base < USER_MMAP_START || base.saturating_add(aligned_len) > USER_MMAP_END {
+            return -12;
+        }
+        base as i64
     }
 }
 
@@ -340,10 +472,39 @@ fn ioctl(fd: i32, request: u64, argp: *mut u8) -> i64 {
     }
 
     match request {
-        0x5401 => write_winsize(argp),
-        0x5405 | 0x5406 => 0,
+        0x5401 => write_termios(argp),
+        0x5402 | 0x5403 | 0x5404 => 0,
+        0x5405 | 0x5406 | 0x5413 => write_winsize(argp),
         _ => 0,
     }
+}
+
+fn write_termios(argp: *mut u8) -> i64 {
+    if argp.is_null() {
+        return EFAULT;
+    }
+    unsafe {
+        for index in 0..64 {
+            *argp.add(index) = 0;
+        }
+        let iflag = 0u32.to_le_bytes();
+        let oflag = 1u32.to_le_bytes();
+        let cflag = 0xbf_u32.to_le_bytes();
+        let lflag = 0x8a3b_u32.to_le_bytes();
+        for (index, byte) in iflag.iter().enumerate() {
+            *argp.add(index) = *byte;
+        }
+        for (index, byte) in oflag.iter().enumerate() {
+            *argp.add(4 + index) = *byte;
+        }
+        for (index, byte) in cflag.iter().enumerate() {
+            *argp.add(8 + index) = *byte;
+        }
+        for (index, byte) in lflag.iter().enumerate() {
+            *argp.add(12 + index) = *byte;
+        }
+    }
+    0
 }
 
 fn write_winsize(argp: *mut u8) -> i64 {
@@ -378,6 +539,59 @@ fn getcwd(buffer: *mut u8, len: usize) -> i64 {
     buffer as i64
 }
 
+fn gettimeofday(buffer: *mut u8) -> i64 {
+    if buffer.is_null() {
+        return 0;
+    }
+    unsafe {
+        write_user_i64(buffer, 1);
+        write_user_i64(buffer.add(8), 0);
+    }
+    0
+}
+
+fn clock_gettime(buffer: *mut u8) -> i64 {
+    if buffer.is_null() {
+        return EFAULT;
+    }
+    unsafe {
+        write_user_i64(buffer, 1);
+        write_user_i64(buffer.add(8), 0);
+    }
+    0
+}
+
+fn write_three_ids(first: *mut u32, second: *mut u32, third: *mut u32) -> i64 {
+    unsafe {
+        if !first.is_null() {
+            *first = 0;
+        }
+        if !second.is_null() {
+            *second = 0;
+        }
+        if !third.is_null() {
+            *third = 0;
+        }
+    }
+    0
+}
+
+fn readlink(path: *const u8, buffer: *mut u8, len: usize) -> i64 {
+    if path.is_null() || buffer.is_null() {
+        return EFAULT;
+    }
+    if !path_equals(path, b"/proc/self/exe") && !path_equals(path, b"/proc/curproc/file") {
+        return ENOENT;
+    }
+
+    let value = b"/bash";
+    let count = len.min(value.len());
+    unsafe {
+        core::ptr::copy_nonoverlapping(value.as_ptr(), buffer, count);
+    }
+    count as i64
+}
+
 fn chdir(path: *const u8) -> i64 {
     if path_is_root_or_dot(path) {
         0
@@ -397,6 +611,37 @@ fn getrandom(buffer: *mut u8, len: usize) -> i64 {
         }
     }
     count as i64
+}
+
+fn arch_prctl(code: u64, address: u64) -> i64 {
+    match code {
+        ARCH_SET_FS => unsafe {
+            arch::wrmsr(IA32_FS_BASE, address);
+            0
+        },
+        ARCH_GET_FS => {
+            if address == 0 {
+                return EFAULT;
+            }
+            let value = unsafe { arch::rdmsr(IA32_FS_BASE) };
+            unsafe {
+                *(address as *mut u64) = value;
+            }
+            0
+        }
+        _ => EINVAL,
+    }
+}
+
+fn log_unknown_syscall(id: u64) {
+    unsafe {
+        UNKNOWN_LOGS = UNKNOWN_LOGS.wrapping_add(1);
+        if UNKNOWN_LOGS <= 32 || UNKNOWN_LOGS % 128 == 0 {
+            serial::write_str("nk: unknown linux syscall id=");
+            serial::write_hex_u64(id);
+            serial::write_line("");
+        }
+    }
 }
 
 fn write_fake_stat(stat_buf: *mut u8) -> i64 {
@@ -507,5 +752,33 @@ fn path_is_root_or_dot(path: *const u8) -> bool {
             (b'/', 0, _) | (b'.', 0, _) | (b'.', b'/', 0) => true,
             _ => false,
         }
+    }
+}
+
+fn path_equals(path: *const u8, value: &[u8]) -> bool {
+    if path.is_null() {
+        return false;
+    }
+    unsafe {
+        for (index, expected) in value.iter().enumerate() {
+            if *path.add(index) != *expected {
+                return false;
+            }
+        }
+        *path.add(value.len()) == 0
+    }
+}
+
+unsafe fn read_user_u64(ptr: *const u8) -> u64 {
+    let mut bytes = [0u8; 8];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = *ptr.add(index);
+    }
+    u64::from_le_bytes(bytes)
+}
+
+unsafe fn write_user_i64(ptr: *mut u8, value: i64) {
+    for (index, byte) in value.to_le_bytes().iter().enumerate() {
+        *ptr.add(index) = *byte;
     }
 }

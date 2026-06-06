@@ -137,6 +137,10 @@ Build-UserProgram "gui"
 Build-UserProgram "shell"
 Build-UserProgram "taskview"
 Build-CUserProgram "cat"
+$BashPortElf = Join-Path $Root "third_party\bash-5.3\bash"
+if (Test-Path $BashPortElf) {
+    Copy-Item $BashPortElf (Join-Path $Build "user\bash.elf")
+}
 
 $AppFiles = @(
     (Join-Path $Build "user\gui.elf"),

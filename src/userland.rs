@@ -186,11 +186,14 @@ pub fn install_page_table_root(root: PageTableRoot) {
 }
 
 pub fn install_first_task() {
-    install_user_elf(0, "gui", UserAbi::Native, b"GUI     ELF", true);
-    if !install_user_elf(1, "bash", UserAbi::Linux, b"BASH    ELF", false) {
-        serial::write_line("nk: bash elf missing; using temporary terminal fallback");
-        install_user_elf(1, "terminal", UserAbi::Native, b"SHELL   ELF", false);
+    if install_user_elf(0, "bash", UserAbi::Linux, b"BASH    ELF", true) {
+        serial::write_line("nk: booting bash as primary user process");
+        return;
     }
+
+    install_user_elf(0, "gui", UserAbi::Native, b"GUI     ELF", true);
+    serial::write_line("nk: bash elf missing; using temporary terminal fallback");
+    install_user_elf(1, "terminal", UserAbi::Native, b"SHELL   ELF", false);
     install_user_elf(2, "taskviewer", UserAbi::Native, b"TASKVIEWELF", false);
     install_user_elf(3, "cat", UserAbi::Linux, b"CAT     ELF", false);
     scheduler::set_user_task_active(3, false);
@@ -208,7 +211,11 @@ fn install_user_elf(
             memory::clear_user_image();
         }
         if let Some(entry) = load_elf(image) {
-            let stack_top = memory::user_stack_top(index);
+            let stack_top = if matches!(abi, UserAbi::Linux) {
+                linux_stack_top(index, name).unwrap_or_else(|| memory::user_stack_top(index))
+            } else {
+                memory::user_stack_top(index)
+            };
             unsafe {
                 (*USER_ADDRESS_SPACE.0.get()).install_task(entry, stack_top);
             }
@@ -229,6 +236,97 @@ fn install_user_elf(
         serial::write_line(" elf missing on fat32");
         false
     }
+}
+
+fn linux_stack_top(index: usize, argv0: &'static str) -> Option<VirtAddr> {
+    const AT_NULL: u64 = 0;
+    const AT_PAGESZ: u64 = 6;
+    const AT_UID: u64 = 11;
+    const AT_EUID: u64 = 12;
+    const AT_GID: u64 = 13;
+    const AT_EGID: u64 = 14;
+    const AT_SECURE: u64 = 23;
+
+    let stack_base = memory::user_stack_top(index) - 4096;
+    let argv = [argv0.as_bytes(), b"--noprofile", b"--norc", b"-i"];
+    let term = b"TERM=vt100";
+
+    if !memory::clear_user_stack(index) {
+        return None;
+    }
+
+    let mut cursor = 4096usize;
+    let mut argv_addrs = [0u64; 4];
+    for (arg_index, arg) in argv.iter().enumerate().rev() {
+        cursor = align_down(cursor.checked_sub(arg.len() + 1)?, 8);
+        argv_addrs[arg_index] = stack_base + cursor as u64;
+        if !memory::write_user_stack(index, cursor, arg)
+            || !memory::write_user_stack(index, cursor + arg.len(), &[0])
+        {
+            return None;
+        }
+    }
+
+    cursor = align_down(cursor.checked_sub(term.len() + 1)?, 8);
+    let term_addr = stack_base + cursor as u64;
+    if !memory::write_user_stack(index, cursor, term)
+        || !memory::write_user_stack(index, cursor + term.len(), &[0])
+    {
+        return None;
+    }
+
+    cursor = align_down(cursor.checked_sub(16)?, 16);
+    let random_addr = stack_base + cursor as u64;
+    if !memory::write_user_stack(
+        index,
+        cursor,
+        &[
+            0x31, 0x41, 0x59, 0x26, 0x53, 0x58, 0x97, 0x93, 0x23, 0x84, 0x62, 0x64, 0x33, 0x83,
+            0x27, 0x95,
+        ],
+    ) {
+        return None;
+    }
+
+    let words = [
+        argv.len() as u64,
+        argv_addrs[0],
+        argv_addrs[1],
+        argv_addrs[2],
+        argv_addrs[3],
+        0,
+        term_addr,
+        0,
+        AT_PAGESZ,
+        4096,
+        AT_UID,
+        0,
+        AT_EUID,
+        0,
+        AT_GID,
+        0,
+        AT_EGID,
+        0,
+        AT_SECURE,
+        0,
+        25,
+        random_addr,
+        AT_NULL,
+        0,
+    ];
+
+    cursor = align_down(cursor.checked_sub(words.len() * 8)?, 16);
+    for (word_index, word) in words.iter().enumerate() {
+        if !memory::write_user_stack(index, cursor + word_index * 8, &word.to_le_bytes()) {
+            return None;
+        }
+    }
+
+    Some(stack_base + cursor as u64)
+}
+
+const fn align_down(value: usize, align: usize) -> usize {
+    value & !(align - 1)
 }
 
 pub fn start_first_task() -> ! {

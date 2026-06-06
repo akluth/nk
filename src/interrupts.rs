@@ -24,6 +24,11 @@ const PIT_COMMAND: u16 = 0x43;
 const PIT_CHANNEL0: u16 = 0x40;
 const PIT_FREQUENCY: u32 = 1_193_182;
 const TIMER_HZ: u32 = 100;
+const IA32_EFER: u32 = 0xc000_0080;
+const IA32_STAR: u32 = 0xc000_0081;
+const IA32_LSTAR: u32 = 0xc000_0082;
+const IA32_FMASK: u32 = 0xc000_0084;
+const EFER_SYSCALL_ENABLE: u64 = 1;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -79,6 +84,12 @@ static mut IDT: [IdtEntry; IDT_ENTRIES] = [IdtEntry::missing(); IDT_ENTRIES];
 static mut TIMER_TICKS: u64 = 0;
 static mut USER_SWITCH_LOGS: u64 = 0;
 
+#[no_mangle]
+static mut SYSCALL_STACK_TOP: u64 = 0;
+
+#[no_mangle]
+static mut SYSCALL_USER_RSP: u64 = 0;
+
 extern "C" {
     fn isr_default();
     fn isr_general_protection();
@@ -87,6 +98,7 @@ extern "C" {
     fn isr_keyboard();
     fn isr_mouse();
     fn isr_syscall();
+    fn syscall_entry();
 }
 
 global_asm!(
@@ -151,7 +163,8 @@ isr_general_protection:
     cld
     mov rdi, 13
     mov rsi, [rsp + 128]
-    xor rdx, rdx
+    mov rdx, [rsp + 136]
+    xor rcx, rcx
     call rust_fatal_exception
 1:
     hlt
@@ -178,7 +191,8 @@ isr_page_fault:
     cld
     mov rdi, 14
     mov rsi, [rsp + 128]
-    mov rdx, cr2
+    mov rdx, [rsp + 136]
+    mov rcx, cr2
     call rust_fatal_exception
 1:
     hlt
@@ -337,6 +351,52 @@ isr_syscall:
     pop rcx
     pop rax
     iretq
+
+    .global syscall_entry
+syscall_entry:
+    mov [rip + SYSCALL_USER_RSP], rsp
+    mov rsp, [rip + SYSCALL_STACK_TOP]
+    push 0x1b
+    push qword ptr [rip + SYSCALL_USER_RSP]
+    push r11
+    push 0x23
+    push rcx
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8
+    cld
+    lea rdi, [rsp + 8]
+    call rust_syscall_interrupt
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
 "#
 );
 
@@ -363,6 +423,7 @@ pub fn init() {
         load_idt();
         remap_pic();
         configure_pit(TIMER_HZ);
+        configure_syscall_instruction();
         mouse::init();
         unmask_irq(0);
         unmask_irq(1);
@@ -371,6 +432,19 @@ pub fn init() {
     }
 
     arch::enable_interrupts();
+}
+
+unsafe fn configure_syscall_instruction() {
+    SYSCALL_STACK_TOP = gdt::kernel_stack_top();
+    let efer = arch::rdmsr(IA32_EFER);
+    arch::wrmsr(IA32_EFER, efer | EFER_SYSCALL_ENABLE);
+
+    let kernel_code = gdt::KERNEL_CODE_SELECTOR as u64;
+    let user_star = (gdt::USER_DATA_SELECTOR as u64).wrapping_sub(8);
+    arch::wrmsr(IA32_STAR, (user_star << 48) | (kernel_code << 32));
+    arch::wrmsr(IA32_LSTAR, syscall_entry as *const () as usize as u64);
+    arch::wrmsr(IA32_FMASK, 0x200);
+    serial::write_line("nk: syscall instruction enabled");
 }
 
 unsafe fn load_idt() {
@@ -476,8 +550,18 @@ extern "C" fn rust_mouse_interrupt() {
 }
 
 #[no_mangle]
-extern "C" fn rust_unhandled_interrupt(_frame: *mut scheduler::TrapFrame) {
-    serial::write_line("nk: unhandled interrupt");
+extern "C" fn rust_unhandled_interrupt(frame: *mut scheduler::TrapFrame) {
+    let frame = unsafe { &*frame };
+    serial::write_str("nk: unhandled interrupt rip=");
+    serial::write_hex_u64(frame.rip);
+    serial::write_str(" cs=");
+    serial::write_hex_u64(frame.cs);
+    serial::write_str(" rax=");
+    serial::write_hex_u64(frame.rax);
+    serial::write_line("");
+    loop {
+        arch::halt();
+    }
 }
 
 #[no_mangle]
@@ -578,11 +662,13 @@ fn packed_task_info(index: usize) -> u64 {
 }
 
 #[no_mangle]
-extern "C" fn rust_fatal_exception(vector: u64, error: u64, address: u64) -> ! {
+extern "C" fn rust_fatal_exception(vector: u64, error: u64, rip: u64, address: u64) -> ! {
     serial::write_str("nk: fatal exception vector=");
     serial::write_dec_u8(vector as u8);
     serial::write_str(" error=");
     serial::write_hex_u64(error);
+    serial::write_str(" rip=");
+    serial::write_hex_u64(rip);
     serial::write_str(" addr=");
     serial::write_hex_u64(address);
     serial::write_line("");

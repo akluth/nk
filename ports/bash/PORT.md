@@ -12,47 +12,62 @@ Fetch the source on Windows:
 
 ## Kernel Integration Status
 
-- The kernel now prefers `BASH.ELF` for user task slot 1.
+- The kernel now prefers `BASH.ELF` as the primary user task.
 - If `BASH.ELF` is absent from the FAT32 application disk, the old Rust
   terminal remains only as a temporary fallback.
-- Slot 1 runs with the Linux/POSIX syscall personality when `BASH.ELF` exists.
+- Bash runs with the Linux/POSIX syscall personality.
 - The syscall dispatcher selects Linux compatibility by task ABI, not by a
   hard-coded program name.
 - The FAT32 image builder automatically includes `build/user/bash.elf` when a
   Bash port build produces it.
+- QEMU serial verification reaches the real GNU Bash prompt:
+  `bash-5.3#`.
 
 ## Compatibility Implemented So Far
 
 The Linux compatibility path has basic support for:
 
 - `read`, including blocking keyboard-backed stdin.
-- `write` to stdout/stderr.
+- `write` and `writev` to stdout/stderr.
 - `open`, `openat`, `close`, `fstat`, `newfstatat`, and `lseek` for FAT32 files.
-- `brk`, `uname`, `getcwd`, `chdir`, `access`, `ioctl(TIOCGWINSZ)`.
-- UID/GID and parent PID queries.
+- `stat`, `readlink`, `brk`, `mmap`, `munmap`, `uname`, `getcwd`, `chdir`,
+  `access`, `fcntl`, `ioctl(TCGETS)`, and `ioctl(TIOCGWINSZ)`.
+- UID/GID/resuid/resgid and parent PID queries.
 - Signal setup syscalls as no-op compatibility stubs.
 - `arch_prctl`, `set_tid_address`, `set_robust_list`, `prlimit64`, and
   `getrandom` stubs.
-- `exit` and `exit_group`.
+- `gettimeofday`, `clock_gettime`, `wait4`, `exit`, and `exit_group`.
 
-## Still Required Before Bash Can Run
+## Build Bash
 
-Bash is not linked or running yet. The blockers are structural:
+Fetch and build the port on Windows:
+
+```powershell
+.\ports\bash\fetch-bash.ps1
+.\ports\bash\build-bash.ps1
+.\scripts\build-limine.ps1
+```
+
+The Bash binary is a static `x86_64-linux-musl` ELF linked at
+`0x40000000`, so it fits the current nk userland loader.
+
+## Still Required
 
 - `fork`, `execve`, `wait4`/`waitpid`, and process reaping.
 - Pipes and descriptor duplication (`pipe`, `dup`, `dup2`, `dup3`).
 - A real terminal device model with line discipline, termios, and job-control
   signal semantics.
 - Per-process file-descriptor tables rather than the current single FD 3 shim.
-- argv/envp/auxv construction on the initial user stack.
 - Larger and independently allocated user address spaces for real program
   images and heaps.
-- Either a static libc target for nk or enough Linux ABI coverage to run a
-  static Linux Bash binary.
+- Restore GUI, task viewer, and Bash as concurrent isolated user tasks. The
+  current Bash milestone boots Bash as the primary user process because the
+  older single-image address space cannot safely host all large ELF programs at
+  the same virtual base yet.
 
 ## Intended Build Output
 
-When the port is ready, the build should produce:
+The port build produces:
 
 ```text
 build/user/bash.elf

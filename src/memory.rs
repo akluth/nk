@@ -11,6 +11,7 @@ pub const USER_IMAGE_BASE: u64 = 0x0000_0000_4000_0000;
 pub const USER_IMAGE_SIZE: usize = 1536 * 1024;
 pub const USER_IMAGE_PAGES: usize = USER_IMAGE_SIZE / PAGE_SIZE as usize;
 pub const USER_STACK_BASE: u64 = 0x0000_0000_4018_0000;
+const USER_STACK_SIZE: usize = PAGE_SIZE as usize;
 
 const PTE_PRESENT: u64 = 1 << 0;
 const PTE_WRITABLE: u64 = 1 << 1;
@@ -322,6 +323,44 @@ pub fn copy_user_segment(virt: u64, data: &[u8], mem_size: usize) -> bool {
         }
     }
 
+    true
+}
+
+pub fn write_user_stack(index: usize, offset: usize, data: &[u8]) -> bool {
+    if offset
+        .checked_add(data.len())
+        .map_or(true, |end| end > USER_STACK_SIZE)
+    {
+        return false;
+    }
+
+    unsafe {
+        let page = match index {
+            0 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE),
+            1 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE_1),
+            2 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE_2),
+            3 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE_3),
+            _ => return false,
+        };
+        page.bytes[offset..offset + data.len()].copy_from_slice(data);
+    }
+
+    true
+}
+
+pub fn clear_user_stack(index: usize) -> bool {
+    unsafe {
+        let page = match index {
+            0 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE),
+            1 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE_1),
+            2 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE_2),
+            3 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE_3),
+            _ => return false,
+        };
+        for byte in &mut page.bytes {
+            *byte = 0;
+        }
+    }
     true
 }
 

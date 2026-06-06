@@ -56,3 +56,42 @@ pub unsafe fn inl(port: u16) -> u32 {
     asm!("in eax, dx", out("eax") value, in("dx") port, options(nomem, nostack, preserves_flags));
     value
 }
+
+#[inline(always)]
+pub unsafe fn rdmsr(msr: u32) -> u64 {
+    let low: u32;
+    let high: u32;
+    asm!(
+        "rdmsr",
+        in("ecx") msr,
+        out("eax") low,
+        out("edx") high,
+        options(nomem, nostack, preserves_flags)
+    );
+    ((high as u64) << 32) | low as u64
+}
+
+#[inline(always)]
+pub unsafe fn wrmsr(msr: u32, value: u64) {
+    asm!(
+        "wrmsr",
+        in("ecx") msr,
+        in("eax") value as u32,
+        in("edx") (value >> 32) as u32,
+        options(nomem, nostack, preserves_flags)
+    );
+}
+
+pub unsafe fn enable_sse() {
+    asm!(
+        "mov rax, cr0",
+        "and rax, ~(1 << 2)",
+        "or rax, 1 << 1",
+        "mov cr0, rax",
+        "mov rax, cr4",
+        "or rax, (1 << 9) | (1 << 10)",
+        "mov cr4, rax",
+        out("rax") _,
+        options(nostack, preserves_flags)
+    );
+}

@@ -51,6 +51,10 @@ mod microkernel {
         pub fn run(mut self) -> ! {
             serial::init();
             serial::write_line("nk: kernel entered");
+            unsafe {
+                arch::enable_sse();
+            }
+            serial::write_line("nk: sse enabled");
             gdt::init();
             self.scheduler.spawn("desktop");
             self.scheduler.spawn("idle");

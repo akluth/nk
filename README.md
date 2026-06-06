@@ -21,16 +21,18 @@ FAT32 application disk.
   and drawing scaled bitmap text.
 - Starts a passive userland GUI ELF that paints a MATE-style desktop frame with
   a top menu panel and a bottom task list for window switching.
-- Prefers a real `BASH.ELF` in task slot 1. Until that port links, starts the
-  old Rust terminal ELF only as a temporary fallback.
+- Boots a real static GNU Bash 5.3 `BASH.ELF` as the primary user process when
+  that binary is present on the FAT32 application disk.
+- Falls back to the old Rust terminal ELF only when `BASH.ELF` is missing.
 - Starts a third userland task viewer ELF that displays the running user tasks.
 - Starts a fourth userland C `cat` ELF based on the original V7 UNIX `cat.c`
   program body and prints a FAT32 file through a small Linux-like syscall
   compatibility layer.
 - Selects Linux/POSIX syscall handling by task ABI, so future Linux-compatible
   user programs are not tied to hard-coded kernel task names.
-- Includes a GNU Bash port staging area under `ports/bash` and fetches upstream
-  Bash 5.3 sources into ignored `third_party` storage.
+- Includes a GNU Bash port under `ports/bash`; the port fetches upstream Bash
+  5.3 sources into ignored `third_party` storage and builds a static
+  `x86_64-linux-musl` ELF linked at `0x40000000`.
 - Uses a generated monospace bitmap font for GUI text.
 - Tracks a generic focused user-task slot so userland can build taskbar/window
   switching without making the kernel depend on specific GUI programs.
@@ -58,9 +60,10 @@ FAT32 application disk.
 - `src/services.rs`: kernel-side framebuffer service used by GUI syscalls.
 - `src/mouse.rs`: tiny PS/2 mouse packet decoder.
 - `src/linux_abi.rs`: Linux/POSIX syscall compatibility path for Linux ABI
-  user tasks, including basic file I/O, keyboard-backed stdin, `openat`,
-  `fstat`, `lseek`, `brk`, `uname`, `getcwd`, `access`, `ioctl`, UID/GID
-  queries, signal setup stubs, and exit syscalls.
+  user tasks, including basic file I/O, keyboard-backed stdin, `writev`,
+  `openat`, `stat`, `fstat`, `lseek`, `brk`, `mmap`, `readlink`, `uname`,
+  `getcwd`, `access`, `fcntl`, `ioctl`, UID/GID queries, signal setup stubs,
+  time syscalls, and exit syscalls.
 - `src/font.rs`: generated fixed-size monospace bitmap font.
 - `src/framebuffer.rs`: low-level pixel and rectangle drawing.
 - `src/limine.rs`: Limine framebuffer, HHDM, and kernel address requests.
@@ -115,16 +118,17 @@ The build script creates both:
 - `build/user/shell.elf`: the separate userland shell executable.
 - `build/user/taskview.elf`: the separate userland task viewer executable.
 - `build/user/cat.elf`: the separate userland C cat executable.
-- `build/user/bash.elf`: optional future GNU Bash executable; when present it
-  is copied to the app disk as `BASH.ELF` and replaces the fallback terminal.
+- `build/user/bash.elf`: GNU Bash executable; when present it is copied to the
+  app disk as `BASH.ELF` and replaces the fallback terminal.
 - `build/nk-apps.fat32`: the FAT32 disk image containing the user programs.
 
 The ISO only contains the kernel and bootloader files. User programs are loaded
 from the FAT32 application disk at runtime.
 
 Building `cat.elf` requires `clang` and `rust-lld` because it is a C userland
-program rather than a Rust executable. The Bash port is staged but not yet
-linked; see `ports/bash/PORT.md`.
+program rather than a Rust executable. Building Bash requires MSYS2 `make`,
+MSYS2 `gcc` for host build tools, and portable Zig for the static Musl target;
+see `ports/bash/PORT.md`.
 
 ## Run in QEMU
 
@@ -170,8 +174,9 @@ $disk = "$PWD\build\virtio-test.img"
 
 - Add a real compositor/window manager so applications submit private window
   buffers instead of drawing directly into the shared framebuffer.
-- Finish the real GNU Bash port: the kernel already prefers `BASH.ELF`, but the
-  port still needs the POSIX process model listed below.
+- Restore GUI, task viewer, and Bash as concurrent isolated user tasks. Bash now
+  boots as the primary user process; the old shared user image is not enough for
+  multiple large ELF programs at the same virtual base.
 - Add `fork`, `execve`, `waitpid`, pipes, signals, termios/TTY handling, and
   argv/envp/auxv setup for Bash and other real Linux/POSIX programs.
 - Load a real PSF/SSFN font from the app disk instead of compiling the generated
