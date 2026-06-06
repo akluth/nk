@@ -82,6 +82,7 @@ build_c_user_program() {
     -c "$ROOT/user/$name/src/$name.c" \
     -o "$BUILD/user/$name.o"
   "$RUST_LLD" \
+    -flavor gnu \
     -T "$ROOT/user/$name/linker.ld" \
     -o "$BUILD/user/$name.elf" \
     "$BUILD/user/$name.o"
