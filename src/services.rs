@@ -12,9 +12,10 @@ pub mod gui {
     unsafe impl Sync for GlobalFramebuffer {}
 
     static FRAMEBUFFER: GlobalFramebuffer = GlobalFramebuffer(UnsafeCell::new(None));
-    static mut CONSOLE_READY: bool = false;
-    static mut CONSOLE_X: usize = 184;
-    static mut CONSOLE_Y: usize = 520;
+    const CONSOLE_LEN: usize = 2048;
+    static mut CONSOLE_BYTES: [u8; CONSOLE_LEN] = [0; CONSOLE_LEN];
+    static mut CONSOLE_WRITE: usize = 0;
+    static mut CONSOLE_SEQ: u64 = 0;
 
     pub fn install(framebuffer: Framebuffer) {
         unsafe {
@@ -46,38 +47,38 @@ pub mod gui {
 
     pub fn console_write(bytes: &[u8]) {
         unsafe {
-            if !CONSOLE_READY {
-                rect(150, 468, 720, 210, 0x00f3f5f7);
-                rect(150, 468, 720, 40, 0x00343d4a);
-                rect(166, 481, 10, 10, 0x00ff605c);
-                rect(184, 481, 10, 10, 0x00ffbd44);
-                rect(202, 481, 10, 10, 0x0000ca4e);
-                let title = b"cat output";
-                text(234, 478, title.as_ptr(), title.len(), 0x00f3f5f7);
-                CONSOLE_READY = true;
-            }
-
             for byte in bytes {
-                if *byte == b'\n' {
-                    CONSOLE_X = 184;
-                    CONSOLE_Y += font::HEIGHT + 6;
-                    continue;
-                }
-                draw_char(CONSOLE_X, CONSOLE_Y, *byte, 0x00101820);
-                CONSOLE_X += font::ADVANCE;
-                if CONSOLE_X > 820 {
-                    CONSOLE_X = 184;
-                    CONSOLE_Y += font::HEIGHT + 6;
-                }
+                CONSOLE_BYTES[CONSOLE_WRITE % CONSOLE_LEN] = *byte;
+                CONSOLE_WRITE = CONSOLE_WRITE.wrapping_add(1);
+                CONSOLE_SEQ = CONSOLE_SEQ.wrapping_add(1);
             }
         }
     }
 
     pub fn reset_console() {
         unsafe {
-            CONSOLE_READY = false;
-            CONSOLE_X = 184;
-            CONSOLE_Y = 520;
+            CONSOLE_BYTES = [0; CONSOLE_LEN];
+            CONSOLE_WRITE = 0;
+            CONSOLE_SEQ = CONSOLE_SEQ.wrapping_add(1);
+        }
+    }
+
+    pub fn console_seq() -> u64 {
+        unsafe { CONSOLE_SEQ }
+    }
+
+    pub fn console_len() -> usize {
+        unsafe { CONSOLE_WRITE.min(CONSOLE_LEN) }
+    }
+
+    pub fn console_byte(index: usize) -> u8 {
+        unsafe {
+            let len = CONSOLE_WRITE.min(CONSOLE_LEN);
+            if index >= len {
+                return 0;
+            }
+            let start = CONSOLE_WRITE.saturating_sub(len);
+            CONSOLE_BYTES[(start + index) % CONSOLE_LEN]
         }
     }
 

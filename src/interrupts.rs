@@ -643,6 +643,18 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
             frame.rax = scheduler::focus() as u64;
             return;
         }
+        33 => {
+            frame.rax = services::gui::console_seq();
+            return;
+        }
+        34 => {
+            frame.rax = services::gui::console_len() as u64;
+            return;
+        }
+        35 => {
+            frame.rax = services::gui::console_byte(frame.rdi as usize) as u64;
+            return;
+        }
         32 => unsafe {
             serial::write_line("nk: shutdown requested");
             arch::outw(0x604, 0x2000);
