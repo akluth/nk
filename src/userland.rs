@@ -50,7 +50,7 @@ impl MappingFlags {
 
 pub struct AddressSpace {
     mappings: [Option<Mapping>; 16],
-    root: Option<PageTableRoot>,
+    roots: [Option<PageTableRoot>; scheduler::USER_TASKS],
     entry: VirtAddr,
     stack_top: VirtAddr,
 }
@@ -59,7 +59,7 @@ impl AddressSpace {
     pub const fn new() -> Self {
         Self {
             mappings: [None; 16],
-            root: None,
+            roots: [None; scheduler::USER_TASKS],
             entry: 0,
             stack_top: 0,
         }
@@ -88,15 +88,17 @@ impl AddressSpace {
             }
         }
 
-        if let Some(root) = self.root {
-            token ^= root.pml4_phys();
+        for root in &self.roots {
+            if let Some(root) = root {
+                token ^= root.pml4_phys();
+            }
         }
 
         token
     }
 
-    pub fn install_root(&mut self, root: PageTableRoot) {
-        self.root = Some(root);
+    pub fn install_roots(&mut self, roots: [Option<PageTableRoot>; scheduler::USER_TASKS]) {
+        self.roots = roots;
     }
 
     pub fn install_task(&mut self, entry: VirtAddr, stack_top: VirtAddr) {
@@ -104,8 +106,12 @@ impl AddressSpace {
         self.stack_top = stack_top;
     }
 
-    pub fn root(&self) -> Option<PageTableRoot> {
-        self.root
+    pub fn root(&self, index: usize) -> Option<PageTableRoot> {
+        if index >= scheduler::USER_TASKS {
+            None
+        } else {
+            self.roots[index]
+        }
     }
 }
 
@@ -176,26 +182,25 @@ pub fn init() {
     }
 }
 
-pub fn install_page_table_root(root: PageTableRoot) {
+pub fn install_page_table_roots(roots: [Option<PageTableRoot>; scheduler::USER_TASKS]) {
     unsafe {
-        (*USER_ADDRESS_SPACE.0.get()).install_root(root);
+        (*USER_ADDRESS_SPACE.0.get()).install_roots(roots);
     }
     let (user_code, user_data) = gdt::user_selectors();
     let _ = (user_code, user_data);
-    serial::write_line("nk: user page-table root installed");
+    serial::write_line("nk: user page-table roots installed");
 }
 
 pub fn install_first_task() {
-    if install_user_elf(0, "bash", UserAbi::Linux, b"BASH    ELF", true) {
-        serial::write_line("nk: booting bash as primary user process");
-        return;
+    install_user_elf(0, "gui", UserAbi::Native, b"GUI     ELF");
+    if install_user_elf(1, "bash", UserAbi::Linux, b"BASH    ELF") {
+        serial::write_line("nk: bash process installed beside gui");
+    } else {
+        serial::write_line("nk: bash elf missing; using temporary terminal fallback");
+        install_user_elf(1, "terminal", UserAbi::Native, b"SHELL   ELF");
     }
-
-    install_user_elf(0, "gui", UserAbi::Native, b"GUI     ELF", true);
-    serial::write_line("nk: bash elf missing; using temporary terminal fallback");
-    install_user_elf(1, "terminal", UserAbi::Native, b"SHELL   ELF", false);
-    install_user_elf(2, "taskviewer", UserAbi::Native, b"TASKVIEWELF", false);
-    install_user_elf(3, "cat", UserAbi::Linux, b"CAT     ELF", false);
+    install_user_elf(2, "taskviewer", UserAbi::Native, b"TASKVIEWELF");
+    install_user_elf(3, "cat", UserAbi::Linux, b"CAT     ELF");
     scheduler::set_user_task_active(3, false);
 }
 
@@ -204,13 +209,12 @@ fn install_user_elf(
     name: &'static str,
     abi: UserAbi,
     fat_name: &[u8; 11],
-    clear_image: bool,
 ) -> bool {
     if let Some(image) = crate::fat32::read_file(fat_name) {
-        if clear_image {
-            memory::clear_user_image();
+        if !memory::clear_user_image(index) {
+            return false;
         }
-        if let Some(entry) = load_elf(image) {
+        if let Some(entry) = load_elf(index, image) {
             let stack_top = if matches!(abi, UserAbi::Linux) {
                 linux_stack_top(index, name).unwrap_or_else(|| memory::user_stack_top(index))
             } else {
@@ -219,11 +223,18 @@ fn install_user_elf(
             unsafe {
                 (*USER_ADDRESS_SPACE.0.get()).install_task(entry, stack_top);
             }
-            install_task_frame(index, name, abi, entry, stack_top);
-            serial::write_str("nk: ");
-            serial::write_str(name);
-            serial::write_line(" elf process installed");
-            true
+            if let Some(root) = unsafe { (*USER_ADDRESS_SPACE.0.get()).root(index) } {
+                install_task_frame(index, name, abi, root.pml4_phys(), entry, stack_top);
+                serial::write_str("nk: ");
+                serial::write_str(name);
+                serial::write_line(" elf process installed");
+                true
+            } else {
+                serial::write_str("nk: ");
+                serial::write_str(name);
+                serial::write_line(" page-table root missing");
+                false
+            }
         } else {
             serial::write_str("nk: ");
             serial::write_str(name);
@@ -247,7 +258,7 @@ fn linux_stack_top(index: usize, argv0: &'static str) -> Option<VirtAddr> {
     const AT_EGID: u64 = 14;
     const AT_SECURE: u64 = 23;
 
-    let stack_base = memory::user_stack_top(index) - 4096;
+    let stack_base = memory::user_stack_top(index) - memory::USER_STACK_SIZE as u64;
     let argv = [argv0.as_bytes(), b"--noprofile", b"--norc", b"-i"];
     let term = b"TERM=vt100";
 
@@ -255,7 +266,7 @@ fn linux_stack_top(index: usize, argv0: &'static str) -> Option<VirtAddr> {
         return None;
     }
 
-    let mut cursor = 4096usize;
+    let mut cursor = memory::USER_STACK_SIZE;
     let mut argv_addrs = [0u64; 4];
     for (arg_index, arg) in argv.iter().enumerate().rev() {
         cursor = align_down(cursor.checked_sub(arg.len() + 1)?, 8);
@@ -330,13 +341,12 @@ const fn align_down(value: usize, align: usize) -> usize {
 }
 
 pub fn start_first_task() -> ! {
-    let address_space = unsafe { &mut *USER_ADDRESS_SPACE.0.get() };
-    let root = address_space.root().expect("user page-table root missing");
+    let pml4 = scheduler::first_user_pml4().expect("user page-table root missing");
     let frame = scheduler::first_user_frame().expect("ring3 frame missing");
 
     serial::write_line("nk: entering ring3");
     unsafe {
-        enter_ring3_frame(root.pml4_phys(), &frame, gdt::kernel_stack_top());
+        enter_ring3_frame(pml4, &frame, gdt::kernel_stack_top());
     }
 }
 
@@ -344,6 +354,7 @@ fn install_task_frame(
     index: usize,
     name: &'static str,
     abi: UserAbi,
+    pml4_phys: u64,
     entry: VirtAddr,
     stack_top: VirtAddr,
 ) {
@@ -352,6 +363,7 @@ fn install_task_frame(
         index,
         name,
         abi,
+        pml4_phys,
         TrapFrame {
             r15: 0,
             r14: 0,
@@ -377,7 +389,7 @@ fn install_task_frame(
     );
 }
 
-fn load_elf(image: &[u8]) -> Option<u64> {
+fn load_elf(task_index: usize, image: &[u8]) -> Option<u64> {
     if image.len() < 64 || &image[0..4] != b"\x7fELF" {
         return None;
     }
@@ -413,7 +425,7 @@ fn load_elf(image: &[u8]) -> Option<u64> {
         if file_end > image.len() {
             return None;
         }
-        if !memory::copy_user_segment(virt, &image[file_offset..file_end], mem_size) {
+        if !memory::copy_user_segment(task_index, virt, &image[file_offset..file_end], mem_size) {
             return None;
         }
     }

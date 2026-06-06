@@ -1,17 +1,19 @@
 use core::cell::UnsafeCell;
 
-use crate::{limine::KernelAddress, serial};
+use crate::{limine::KernelAddress, scheduler::USER_TASKS, serial};
 
 const PAGE_SIZE: u64 = 4096;
 const PAGE_ENTRIES: usize = 512;
-const TABLE_COUNT: usize = 24;
+const TABLES_PER_TASK: usize = 24;
+const TABLE_COUNT: usize = TABLES_PER_TASK * USER_TASKS;
 const KERNEL_MAPPED_PAGES: usize = 4096;
 const KERNEL_PT_COUNT: usize = (KERNEL_MAPPED_PAGES + PAGE_ENTRIES - 1) / PAGE_ENTRIES + 1;
 pub const USER_IMAGE_BASE: u64 = 0x0000_0000_4000_0000;
 pub const USER_IMAGE_SIZE: usize = 1536 * 1024;
 pub const USER_IMAGE_PAGES: usize = USER_IMAGE_SIZE / PAGE_SIZE as usize;
 pub const USER_STACK_BASE: u64 = 0x0000_0000_4018_0000;
-const USER_STACK_SIZE: usize = PAGE_SIZE as usize;
+pub const USER_STACK_SIZE: usize = 16 * 1024;
+const USER_STACK_PAGES: usize = USER_STACK_SIZE / PAGE_SIZE as usize;
 
 const PTE_PRESENT: u64 = 1 << 0;
 const PTE_WRITABLE: u64 = 1 << 1;
@@ -57,20 +59,34 @@ pub struct FramebufferMapping {
 }
 
 #[repr(align(4096))]
-#[allow(dead_code)]
-pub struct UserPage {
-    bytes: [u8; PAGE_SIZE as usize],
+struct UserStacks {
+    stacks: [UserStack; USER_TASKS],
 }
 
-impl UserPage {
+impl UserStacks {
     const fn empty() -> Self {
         Self {
-            bytes: [0; PAGE_SIZE as usize],
+            stacks: [UserStack::empty(); USER_TASKS],
         }
     }
 }
 
 #[repr(align(4096))]
+#[derive(Clone, Copy)]
+struct UserStack {
+    bytes: [u8; USER_STACK_SIZE],
+}
+
+impl UserStack {
+    const fn empty() -> Self {
+        Self {
+            bytes: [0; USER_STACK_SIZE],
+        }
+    }
+}
+
+#[repr(align(4096))]
+#[derive(Clone, Copy)]
 pub struct UserImage {
     bytes: [u8; USER_IMAGE_SIZE],
 }
@@ -83,42 +99,73 @@ impl UserImage {
     }
 }
 
-static mut USER_IMAGE: UserImage = UserImage::empty();
-static mut USER_STACK_PAGE: UserPage = UserPage::empty();
-static mut USER_STACK_PAGE_1: UserPage = UserPage::empty();
-static mut USER_STACK_PAGE_2: UserPage = UserPage::empty();
-static mut USER_STACK_PAGE_3: UserPage = UserPage::empty();
+#[repr(align(4096))]
+struct UserImages {
+    images: [UserImage; USER_TASKS],
+}
 
-pub fn create_user_address_space(
+impl UserImages {
+    const fn empty() -> Self {
+        Self {
+            images: [UserImage::empty(); USER_TASKS],
+        }
+    }
+}
+
+static mut USER_IMAGES: UserImages = UserImages::empty();
+static mut USER_STACKS: UserStacks = UserStacks::empty();
+
+pub fn create_user_address_spaces(
     kernel: KernelAddress,
     framebuffer: Option<FramebufferMapping>,
-) -> Option<PageTableRoot> {
+) -> [Option<PageTableRoot>; USER_TASKS] {
     unsafe {
         let tables = &mut *PAGE_TABLES.0.get();
         for table in tables.iter_mut() {
             table.clear();
         }
+    }
 
-        let pml4 = 0;
-        let pdpt = 1;
-        let user_pd = 2;
-        let user_pt = 3;
-        let kernel_pdpt = 4;
-        let kernel_pd = 5;
-        let kernel_pts = 6;
-        let framebuffer_pdpt = 15;
-        let framebuffer_pd = 16;
-        let framebuffer_pts = 17;
+    [
+        create_user_address_space(0, kernel, framebuffer),
+        create_user_address_space(1, kernel, framebuffer),
+        create_user_address_space(2, kernel, framebuffer),
+        create_user_address_space(3, kernel, framebuffer),
+    ]
+}
+
+fn create_user_address_space(
+    task_index: usize,
+    kernel: KernelAddress,
+    framebuffer: Option<FramebufferMapping>,
+) -> Option<PageTableRoot> {
+    if task_index >= USER_TASKS {
+        return None;
+    }
+
+    unsafe {
+        let tables = &mut *PAGE_TABLES.0.get();
+
+        let table_base = task_index * TABLES_PER_TASK;
+        let pml4 = table_base;
+        let pdpt = table_base + 1;
+        let user_pd = table_base + 2;
+        let user_pt = table_base + 3;
+        let kernel_pdpt = table_base + 4;
+        let kernel_pd = table_base + 5;
+        let kernel_pts = table_base + 6;
+        let framebuffer_pdpt = table_base + 15;
+        let framebuffer_pd = table_base + 16;
+        let framebuffer_pts = table_base + 17;
 
         link_table(tables, kernel, pml4, 0, pdpt, PTE_USER);
         link_table(tables, kernel, pdpt, 1, user_pd, PTE_USER);
         link_table(tables, kernel, user_pd, 0, user_pt, PTE_USER);
-        let user_stack_phys = page_phys(core::ptr::addr_of!(USER_STACK_PAGE), kernel);
-        let user_stack_1_phys = page_phys(core::ptr::addr_of!(USER_STACK_PAGE_1), kernel);
-        let user_stack_2_phys = page_phys(core::ptr::addr_of!(USER_STACK_PAGE_2), kernel);
-        let user_stack_3_phys = page_phys(core::ptr::addr_of!(USER_STACK_PAGE_3), kernel);
 
-        let user_image_phys = virt_to_phys(core::ptr::addr_of!(USER_IMAGE) as u64, kernel);
+        let user_image_phys = virt_to_phys(
+            core::ptr::addr_of!(USER_IMAGES.images[task_index]) as u64,
+            kernel,
+        );
         for page in 0..USER_IMAGE_PAGES {
             map_page(
                 tables,
@@ -128,34 +175,21 @@ pub fn create_user_address_space(
                 PTE_USER,
             );
         }
-        map_page(
-            tables,
-            user_pt,
-            ((USER_STACK_BASE - USER_IMAGE_BASE) / PAGE_SIZE) as usize,
-            user_stack_phys,
-            PTE_USER | PTE_NO_EXECUTE,
+
+        let user_stack_phys = virt_to_phys(
+            core::ptr::addr_of!(USER_STACKS.stacks[task_index]) as u64,
+            kernel,
         );
-        map_page(
-            tables,
-            user_pt,
-            ((USER_STACK_BASE - USER_IMAGE_BASE) / PAGE_SIZE) as usize + 1,
-            user_stack_1_phys,
-            PTE_USER | PTE_NO_EXECUTE,
-        );
-        map_page(
-            tables,
-            user_pt,
-            ((USER_STACK_BASE - USER_IMAGE_BASE) / PAGE_SIZE) as usize + 2,
-            user_stack_2_phys,
-            PTE_USER | PTE_NO_EXECUTE,
-        );
-        map_page(
-            tables,
-            user_pt,
-            ((USER_STACK_BASE - USER_IMAGE_BASE) / PAGE_SIZE) as usize + 3,
-            user_stack_3_phys,
-            PTE_USER | PTE_NO_EXECUTE,
-        );
+        let stack_page_base = ((USER_STACK_BASE - USER_IMAGE_BASE) / PAGE_SIZE) as usize;
+        for page in 0..USER_STACK_PAGES {
+            map_page(
+                tables,
+                user_pt,
+                stack_page_base + page,
+                user_stack_phys + (page as u64 * PAGE_SIZE),
+                PTE_USER | PTE_NO_EXECUTE,
+            );
+        }
 
         let (pml4_index, pdpt_index, pd_index, pt_index) = page_indexes(kernel.virtual_base);
         link_table(tables, kernel, pml4, pml4_index, kernel_pdpt, 0);
@@ -199,7 +233,9 @@ pub fn create_user_address_space(
         }
 
         let _ = PAGE_SIZE;
-        serial::write_line("nk: user page tables created");
+        serial::write_str("nk: user page tables created for task ");
+        serial::write_dec_u8(task_index as u8);
+        serial::write_line("");
         Some(PageTableRoot {
             pml4_phys: table_phys(tables, kernel, pml4),
         })
@@ -279,10 +315,6 @@ fn virt_to_phys(virt: u64, kernel: KernelAddress) -> u64 {
     virt - kernel.virtual_base + kernel.physical_base
 }
 
-fn page_phys(page: *const UserPage, kernel: KernelAddress) -> u64 {
-    virt_to_phys(page as u64, kernel)
-}
-
 fn page_indexes(virt: u64) -> (usize, usize, usize, usize) {
     (
         ((virt >> 39) & 0x1ff) as usize,
@@ -292,17 +324,22 @@ fn page_indexes(virt: u64) -> (usize, usize, usize, usize) {
     )
 }
 
-pub fn clear_user_image() {
+pub fn clear_user_image(index: usize) -> bool {
+    if index >= USER_TASKS {
+        return false;
+    }
+
     unsafe {
-        let image = &mut *core::ptr::addr_of_mut!(USER_IMAGE);
+        let image = &mut (*core::ptr::addr_of_mut!(USER_IMAGES)).images[index];
         for byte in &mut image.bytes {
             *byte = 0;
         }
     }
+    true
 }
 
-pub fn copy_user_segment(virt: u64, data: &[u8], mem_size: usize) -> bool {
-    if virt < USER_IMAGE_BASE {
+pub fn copy_user_segment(index: usize, virt: u64, data: &[u8], mem_size: usize) -> bool {
+    if index >= USER_TASKS || virt < USER_IMAGE_BASE {
         return false;
     }
 
@@ -316,7 +353,7 @@ pub fn copy_user_segment(virt: u64, data: &[u8], mem_size: usize) -> bool {
     }
 
     unsafe {
-        let image = &mut *core::ptr::addr_of_mut!(USER_IMAGE);
+        let image = &mut (*core::ptr::addr_of_mut!(USER_IMAGES)).images[index];
         image.bytes[offset..offset + data.len()].copy_from_slice(data);
         for byte in &mut image.bytes[offset + data.len()..offset + mem_size] {
             *byte = 0;
@@ -335,13 +372,10 @@ pub fn write_user_stack(index: usize, offset: usize, data: &[u8]) -> bool {
     }
 
     unsafe {
-        let page = match index {
-            0 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE),
-            1 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE_1),
-            2 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE_2),
-            3 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE_3),
-            _ => return false,
-        };
+        if index >= USER_TASKS {
+            return false;
+        }
+        let page = &mut (*core::ptr::addr_of_mut!(USER_STACKS)).stacks[index];
         page.bytes[offset..offset + data.len()].copy_from_slice(data);
     }
 
@@ -350,13 +384,10 @@ pub fn write_user_stack(index: usize, offset: usize, data: &[u8]) -> bool {
 
 pub fn clear_user_stack(index: usize) -> bool {
     unsafe {
-        let page = match index {
-            0 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE),
-            1 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE_1),
-            2 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE_2),
-            3 => &mut *core::ptr::addr_of_mut!(USER_STACK_PAGE_3),
-            _ => return false,
-        };
+        if index >= USER_TASKS {
+            return false;
+        }
+        let page = &mut (*core::ptr::addr_of_mut!(USER_STACKS)).stacks[index];
         for byte in &mut page.bytes {
             *byte = 0;
         }
@@ -364,6 +395,6 @@ pub fn clear_user_stack(index: usize) -> bool {
     true
 }
 
-pub const fn user_stack_top(index: usize) -> u64 {
-    USER_STACK_BASE + PAGE_SIZE * (index as u64 + 1)
+pub const fn user_stack_top(_index: usize) -> u64 {
+    USER_STACK_BASE + USER_STACK_SIZE as u64
 }

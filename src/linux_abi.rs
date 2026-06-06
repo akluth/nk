@@ -206,12 +206,20 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
         }
         SYS_EXIT => {
             serial::write_line("nk: linux task exited");
-            let _scheduled = scheduler::exit_current_user(frame);
+            if let Some(pml4_phys) = scheduler::exit_current_user(frame) {
+                unsafe {
+                    crate::arch::load_cr3(pml4_phys);
+                }
+            }
             true
         }
         SYS_EXIT_GROUP => {
             serial::write_line("nk: linux task exited");
-            let _scheduled = scheduler::exit_current_user(frame);
+            if let Some(pml4_phys) = scheduler::exit_current_user(frame) {
+                unsafe {
+                    crate::arch::load_cr3(pml4_phys);
+                }
+            }
             true
         }
         SYS_CLOCK_GETTIME => {

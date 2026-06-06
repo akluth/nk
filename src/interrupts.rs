@@ -517,14 +517,15 @@ extern "C" fn rust_timer_interrupt(frame: *mut scheduler::TrapFrame) {
         if TIMER_TICKS == 1 || TIMER_TICKS % 100 == 0 {
             serial::write_line("nk: timer interrupt");
         }
-        if let Some(name) = scheduler::schedule_user(&mut *frame) {
+        if let Some(task_switch) = scheduler::schedule_user(&mut *frame) {
+            arch::load_cr3(task_switch.pml4_phys);
             USER_SWITCH_LOGS = USER_SWITCH_LOGS.wrapping_add(1);
             if USER_SWITCH_LOGS > 16 && USER_SWITCH_LOGS % 100 != 0 {
                 send_eoi(0);
                 return;
             }
             serial::write_str("nk: switched to ");
-            serial::write_line(name);
+            serial::write_line(task_switch.name);
         }
         let _ = scheduler_ticks;
         send_eoi(0);

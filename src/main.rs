@@ -82,12 +82,9 @@ mod microkernel {
             userland::init();
             let mut can_enter_user = false;
             if let Some(kernel_address) = limine::kernel_address() {
-                if let Some(root) =
-                    memory::create_user_address_space(kernel_address, framebuffer_mapping)
-                {
-                    userland::install_page_table_root(root);
-                    can_enter_user = true;
-                }
+                let roots = memory::create_user_address_spaces(kernel_address, framebuffer_mapping);
+                userland::install_page_table_roots(roots);
+                can_enter_user = true;
             } else {
                 serial::write_line("nk: no kernel address response");
             }

@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 
-const USER_TASKS: usize = 4;
+pub const USER_TASKS: usize = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -48,6 +48,7 @@ pub enum UserAbi {
 struct UserTask {
     name: &'static str,
     abi: UserAbi,
+    pml4_phys: u64,
     initial_frame: TrapFrame,
     frame: TrapFrame,
     ticks: u64,
@@ -82,12 +83,19 @@ impl UserTask {
         Self {
             name: "",
             abi: UserAbi::Native,
+            pml4_phys: 0,
             initial_frame: Self::EMPTY_FRAME,
             frame: Self::EMPTY_FRAME,
             ticks: 0,
             active: false,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+pub struct UserSwitch {
+    pub name: &'static str,
+    pub pml4_phys: u64,
 }
 
 struct UserScheduler {
@@ -113,7 +121,14 @@ impl UserScheduler {
         }
     }
 
-    fn install(&mut self, index: usize, name: &'static str, abi: UserAbi, frame: TrapFrame) {
+    fn install(
+        &mut self,
+        index: usize,
+        name: &'static str,
+        abi: UserAbi,
+        pml4_phys: u64,
+        frame: TrapFrame,
+    ) {
         if index >= USER_TASKS {
             return;
         }
@@ -121,6 +136,7 @@ impl UserScheduler {
         self.tasks[index] = UserTask {
             name,
             abi,
+            pml4_phys,
             initial_frame: frame,
             frame,
             ticks: 0,
@@ -129,7 +145,7 @@ impl UserScheduler {
         self.installed = self.installed.max(index + 1);
     }
 
-    fn schedule(&mut self, frame: &mut TrapFrame) -> Option<&'static str> {
+    fn schedule(&mut self, frame: &mut TrapFrame) -> Option<UserSwitch> {
         if self.installed < 2 || frame.cs & 0x3 != 0x3 {
             return None;
         }
@@ -144,7 +160,10 @@ impl UserScheduler {
 
         self.current = next;
         *frame = self.tasks[self.current].frame;
-        Some(self.tasks[self.current].name)
+        Some(UserSwitch {
+            name: self.tasks[self.current].name,
+            pml4_phys: self.tasks[self.current].pml4_phys,
+        })
     }
 
     fn first_frame(&self) -> Option<TrapFrame> {
@@ -152,6 +171,14 @@ impl UserScheduler {
             None
         } else {
             Some(self.tasks[0].frame)
+        }
+    }
+
+    fn first_pml4(&self) -> Option<u64> {
+        if self.installed == 0 || !self.tasks[0].active {
+            None
+        } else {
+            Some(self.tasks[0].pml4_phys)
         }
     }
 
@@ -180,9 +207,9 @@ impl UserScheduler {
         }
     }
 
-    fn exit_current(&mut self, frame: &mut TrapFrame) -> bool {
+    fn exit_current(&mut self, frame: &mut TrapFrame) -> Option<u64> {
         if self.installed == 0 {
-            return false;
+            return None;
         }
 
         self.tasks[self.current].active = false;
@@ -192,12 +219,12 @@ impl UserScheduler {
                 self.current = next;
                 self.focus = next;
                 *frame = self.tasks[self.current].frame;
-                return true;
+                return Some(self.tasks[self.current].pml4_phys);
             }
             next = (next + 1) % self.installed;
         }
 
-        false
+        None
     }
 
     fn set_active(&mut self, index: usize, active: bool) {
@@ -288,9 +315,15 @@ pub fn tick() -> u64 {
     }
 }
 
-pub fn install_user_task(index: usize, name: &'static str, abi: UserAbi, frame: TrapFrame) {
+pub fn install_user_task(
+    index: usize,
+    name: &'static str,
+    abi: UserAbi,
+    pml4_phys: u64,
+    frame: TrapFrame,
+) {
     unsafe {
-        (*USER_SCHEDULER.0.get()).install(index, name, abi, frame);
+        (*USER_SCHEDULER.0.get()).install(index, name, abi, pml4_phys, frame);
     }
 }
 
@@ -304,7 +337,11 @@ pub fn first_user_frame() -> Option<TrapFrame> {
     unsafe { (*USER_SCHEDULER.0.get()).first_frame() }
 }
 
-pub fn schedule_user(frame: &mut TrapFrame) -> Option<&'static str> {
+pub fn first_user_pml4() -> Option<u64> {
+    unsafe { (*USER_SCHEDULER.0.get()).first_pml4() }
+}
+
+pub fn schedule_user(frame: &mut TrapFrame) -> Option<UserSwitch> {
     unsafe { (*USER_SCHEDULER.0.get()).schedule(frame) }
 }
 
@@ -320,7 +357,7 @@ pub fn current_user_abi() -> Option<UserAbi> {
     unsafe { (*USER_SCHEDULER.0.get()).current_abi() }
 }
 
-pub fn exit_current_user(frame: &mut TrapFrame) -> bool {
+pub fn exit_current_user(frame: &mut TrapFrame) -> Option<u64> {
     unsafe { (*USER_SCHEDULER.0.get()).exit_current(frame) }
 }
 
