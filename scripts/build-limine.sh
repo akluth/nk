@@ -26,6 +26,34 @@ rm -rf "$BUILD"
 mkdir -p "$ISO_ROOT/boot" "$ISO_ROOT/EFI/BOOT"
 mkdir -p "$BUILD/user"
 
+find_rust_lld() {
+  if command -v rust-lld >/dev/null 2>&1; then
+    command -v rust-lld
+    return
+  fi
+
+  local sysroot
+  sysroot="$(rustc --print sysroot)"
+  local host
+  host="$(rustc -vV | awk '/^host:/ { print $2 }')"
+  local candidates=(
+    "$sysroot/bin/rust-lld"
+    "$sysroot/lib/rustlib/$host/bin/rust-lld"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  echo "rust-lld fehlt. Installiere die Rust-Komponente mit: rustup component add llvm-tools-preview" >&2
+  exit 1
+}
+
+RUST_LLD="$(find_rust_lld)"
+
 build_user_program() {
   local name="$1"
   rustc \
@@ -35,7 +63,7 @@ build_user_program() {
     -C panic=abort \
     -C relocation-model=static \
     -C code-model=small \
-    -C linker=rust-lld \
+    -C "linker=$RUST_LLD" \
     "-Clink-arg=-T$ROOT/user/$name/linker.ld" \
     -o "$BUILD/user/$name.elf" \
     "$ROOT/user/$name/src/main.rs"
@@ -53,7 +81,7 @@ build_c_user_program() {
     -nostdlib \
     -c "$ROOT/user/$name/src/$name.c" \
     -o "$BUILD/user/$name.o"
-  rust-lld \
+  "$RUST_LLD" \
     -T "$ROOT/user/$name/linker.ld" \
     -o "$BUILD/user/$name.elf" \
     "$BUILD/user/$name.o"
