@@ -321,7 +321,15 @@ fn linux_stack_top(index: usize, argv: &[&[u8]]) -> Option<VirtAddr> {
     const AT_SECURE: u64 = 23;
 
     let stack_base = memory::user_stack_top(index) - memory::USER_STACK_SIZE as u64;
-    let env = [b"TERM=vt100".as_slice(), b"PATH=/".as_slice()];
+    let env = [
+        b"TERM=linux".as_slice(),
+        b"PATH=/".as_slice(),
+        b"HOME=/root".as_slice(),
+        b"USER=root".as_slice(),
+        b"LOGNAME=root".as_slice(),
+        b"HOSTNAME=archiso".as_slice(),
+        b"PS1=root@archiso ~ # ".as_slice(),
+    ];
 
     if !memory::clear_user_stack(index) {
         return None;
@@ -342,7 +350,7 @@ fn linux_stack_top(index: usize, argv: &[&[u8]]) -> Option<VirtAddr> {
         }
     }
 
-    let mut env_addrs = [0u64; 2];
+    let mut env_addrs = [0u64; 8];
     for (env_index, env_value) in env.iter().enumerate().rev() {
         cursor = align_down(cursor.checked_sub(env_value.len() + 1)?, 8);
         env_addrs[env_index] = stack_base + cursor as u64;
@@ -376,8 +384,8 @@ fn linux_stack_top(index: usize, argv: &[&[u8]]) -> Option<VirtAddr> {
     }
     words[word_count] = 0;
     word_count += 1;
-    for env_addr in env_addrs {
-        words[word_count] = env_addr;
+    for env_addr in &env_addrs[..env.len()] {
+        words[word_count] = *env_addr;
         word_count += 1;
     }
     words[word_count] = 0;

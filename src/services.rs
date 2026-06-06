@@ -16,6 +16,14 @@ pub mod gui {
     static mut CONSOLE_BYTES: [u8; CONSOLE_LEN] = [0; CONSOLE_LEN];
     static mut CONSOLE_WRITE: usize = 0;
     static mut CONSOLE_SEQ: u64 = 0;
+    const TERM_MAX_COLS: usize = 160;
+    const TERM_MAX_ROWS: usize = 64;
+    const TERM_BG: u32 = 0x00000000;
+    const TERM_FG: u32 = 0x00d8d8d8;
+    const TERM_LINE_H: usize = font::HEIGHT + 2;
+    static mut TERM_BYTES: [[u8; TERM_MAX_COLS]; TERM_MAX_ROWS] =
+        [[0; TERM_MAX_COLS]; TERM_MAX_ROWS];
+    static mut TERM_LENS: [usize; TERM_MAX_ROWS] = [0; TERM_MAX_ROWS];
     static mut TEXT_COL: usize = 0;
     static mut TEXT_ROW: usize = 0;
 
@@ -23,7 +31,7 @@ pub mod gui {
         unsafe {
             *FRAMEBUFFER.0.get() = Some(framebuffer);
         }
-        clear(0x0010161c);
+        reset_terminal_screen();
         serial::write_line("nk: framebuffer service ready");
     }
 
@@ -64,10 +72,9 @@ pub mod gui {
             CONSOLE_BYTES = [0; CONSOLE_LEN];
             CONSOLE_WRITE = 0;
             CONSOLE_SEQ = CONSOLE_SEQ.wrapping_add(1);
-            TEXT_COL = 0;
-            TEXT_ROW = 0;
+            reset_terminal_state();
         }
-        clear(0x0010161c);
+        reset_terminal_screen();
     }
 
     pub fn console_seq() -> u64 {
@@ -111,12 +118,6 @@ pub mod gui {
     }
 
     unsafe fn draw_terminal_byte(byte: u8) {
-        const BG: u32 = 0x0010161c;
-        const FG: u32 = 0x00d7e1d8;
-        const MARGIN_X: usize = 12;
-        const MARGIN_Y: usize = 12;
-        const LINE_H: usize = 16;
-
         let Some((cols, rows)) = terminal_grid() else {
             return;
         };
@@ -129,20 +130,16 @@ pub mod gui {
                 TEXT_COL = 0;
                 TEXT_ROW += 1;
                 if TEXT_ROW >= rows {
-                    clear(BG);
+                    scroll_terminal(rows, cols);
                     TEXT_ROW = rows.saturating_sub(1);
                 }
             }
             8 => {
                 if TEXT_COL > 0 {
                     TEXT_COL -= 1;
-                    rect(
-                        MARGIN_X + TEXT_COL * font::ADVANCE,
-                        MARGIN_Y + TEXT_ROW * LINE_H,
-                        font::ADVANCE,
-                        LINE_H,
-                        BG,
-                    );
+                    TERM_BYTES[TEXT_ROW][TEXT_COL] = 0;
+                    TERM_LENS[TEXT_ROW] = TEXT_COL;
+                    draw_terminal_cell(TEXT_COL, TEXT_ROW, b' ');
                 }
             }
             byte if byte >= 0x20 => {
@@ -151,15 +148,12 @@ pub mod gui {
                     TEXT_ROW += 1;
                 }
                 if TEXT_ROW >= rows {
-                    clear(BG);
+                    scroll_terminal(rows, cols);
                     TEXT_ROW = rows.saturating_sub(1);
                 }
-                draw_char(
-                    MARGIN_X + TEXT_COL * font::ADVANCE,
-                    MARGIN_Y + TEXT_ROW * LINE_H,
-                    byte,
-                    FG,
-                );
+                TERM_BYTES[TEXT_ROW][TEXT_COL] = byte;
+                TERM_LENS[TEXT_ROW] = TERM_LENS[TEXT_ROW].max(TEXT_COL + 1);
+                draw_terminal_cell(TEXT_COL, TEXT_ROW, byte);
                 TEXT_COL += 1;
             }
             _ => {}
@@ -168,8 +162,59 @@ pub mod gui {
 
     unsafe fn terminal_grid() -> Option<(usize, usize)> {
         let framebuffer = (*FRAMEBUFFER.0.get()).as_ref()?;
-        let cols = framebuffer.width().saturating_sub(24) / font::ADVANCE;
-        let rows = framebuffer.height().saturating_sub(24) / 16;
-        Some((cols.max(1), rows.max(1)))
+        let cols = (framebuffer.width() / font::ADVANCE)
+            .clamp(1, TERM_MAX_COLS);
+        let rows = (framebuffer.height() / TERM_LINE_H).clamp(1, TERM_MAX_ROWS);
+        Some((cols, rows))
+    }
+
+    unsafe fn reset_terminal_state() {
+        TERM_BYTES = [[0; TERM_MAX_COLS]; TERM_MAX_ROWS];
+        TERM_LENS = [0; TERM_MAX_ROWS];
+        TEXT_COL = 0;
+        TEXT_ROW = 0;
+    }
+
+    fn reset_terminal_screen() {
+        unsafe {
+            reset_terminal_state();
+        }
+        clear(TERM_BG);
+    }
+
+    unsafe fn scroll_terminal(rows: usize, cols: usize) {
+        for row in 1..rows {
+            TERM_BYTES[row - 1] = TERM_BYTES[row];
+            TERM_LENS[row - 1] = TERM_LENS[row].min(cols);
+        }
+        TERM_BYTES[rows - 1] = [0; TERM_MAX_COLS];
+        TERM_LENS[rows - 1] = 0;
+        redraw_terminal(rows, cols);
+    }
+
+    unsafe fn redraw_terminal(rows: usize, cols: usize) {
+        clear(TERM_BG);
+        for row in 0..rows {
+            draw_terminal_row(row, cols);
+        }
+    }
+
+    unsafe fn draw_terminal_row(row: usize, cols: usize) {
+        let len = TERM_LENS[row].min(cols);
+        for col in 0..len {
+            let byte = TERM_BYTES[row][col];
+            if byte != 0 {
+                draw_terminal_cell(col, row, byte);
+            }
+        }
+    }
+
+    unsafe fn draw_terminal_cell(col: usize, row: usize, byte: u8) {
+        let x = col * font::ADVANCE;
+        let y = row * TERM_LINE_H;
+        rect(x, y, font::ADVANCE, TERM_LINE_H, TERM_BG);
+        if byte != b' ' {
+            draw_char(x, y, byte, TERM_FG);
+        }
     }
 }
