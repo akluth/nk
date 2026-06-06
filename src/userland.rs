@@ -6,7 +6,7 @@ use core::{
 use crate::{
     gdt,
     memory::{self, PageTableRoot},
-    scheduler::{self, TrapFrame},
+    scheduler::{self, TrapFrame, UserAbi},
     serial,
 };
 
@@ -107,7 +107,6 @@ impl AddressSpace {
     pub fn root(&self) -> Option<PageTableRoot> {
         self.root
     }
-
 }
 
 struct GlobalAddressSpace(UnsafeCell<AddressSpace>);
@@ -187,14 +186,23 @@ pub fn install_page_table_root(root: PageTableRoot) {
 }
 
 pub fn install_first_task() {
-    install_user_elf(0, "gui", b"GUI     ELF", true);
-    install_user_elf(1, "shell", b"SHELL   ELF", false);
-    install_user_elf(2, "taskviewer", b"TASKVIEWELF", false);
-    install_user_elf(3, "cat", b"CAT     ELF", false);
+    install_user_elf(0, "gui", UserAbi::Native, b"GUI     ELF", true);
+    if !install_user_elf(1, "bash", UserAbi::Linux, b"BASH    ELF", false) {
+        serial::write_line("nk: bash elf missing; using temporary terminal fallback");
+        install_user_elf(1, "terminal", UserAbi::Native, b"SHELL   ELF", false);
+    }
+    install_user_elf(2, "taskviewer", UserAbi::Native, b"TASKVIEWELF", false);
+    install_user_elf(3, "cat", UserAbi::Linux, b"CAT     ELF", false);
     scheduler::set_user_task_active(3, false);
 }
 
-fn install_user_elf(index: usize, name: &'static str, fat_name: &[u8; 11], clear_image: bool) {
+fn install_user_elf(
+    index: usize,
+    name: &'static str,
+    abi: UserAbi,
+    fat_name: &[u8; 11],
+    clear_image: bool,
+) -> bool {
     if let Some(image) = crate::fat32::read_file(fat_name) {
         if clear_image {
             memory::clear_user_image();
@@ -204,19 +212,22 @@ fn install_user_elf(index: usize, name: &'static str, fat_name: &[u8; 11], clear
             unsafe {
                 (*USER_ADDRESS_SPACE.0.get()).install_task(entry, stack_top);
             }
-            install_task_frame(index, name, entry, stack_top);
+            install_task_frame(index, name, abi, entry, stack_top);
             serial::write_str("nk: ");
             serial::write_str(name);
             serial::write_line(" elf process installed");
+            true
         } else {
             serial::write_str("nk: ");
             serial::write_str(name);
             serial::write_line(" elf load failed");
+            false
         }
     } else {
         serial::write_str("nk: ");
         serial::write_str(name);
         serial::write_line(" elf missing on fat32");
+        false
     }
 }
 
@@ -227,19 +238,22 @@ pub fn start_first_task() -> ! {
 
     serial::write_line("nk: entering ring3");
     unsafe {
-        enter_ring3_frame(
-            root.pml4_phys(),
-            &frame,
-            gdt::kernel_stack_top(),
-        );
+        enter_ring3_frame(root.pml4_phys(), &frame, gdt::kernel_stack_top());
     }
 }
 
-fn install_task_frame(index: usize, name: &'static str, entry: VirtAddr, stack_top: VirtAddr) {
+fn install_task_frame(
+    index: usize,
+    name: &'static str,
+    abi: UserAbi,
+    entry: VirtAddr,
+    stack_top: VirtAddr,
+) {
     let (code, data) = gdt::user_selectors();
     scheduler::install_user_task(
         index,
         name,
+        abi,
         TrapFrame {
             r15: 0,
             r14: 0,

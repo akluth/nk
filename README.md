@@ -15,16 +15,22 @@ FAT32 application disk.
 - Builds a FAT32 application disk containing `GUI.ELF`, `SHELL.ELF`, and
   `TASKVIEW.ELF`, `CAT.ELF`, plus small data files.
 - Reads that FAT32 disk through a first ATA PIO block-device path.
-- Parses GUI, shell, and task viewer ELF files in the kernel and starts them as
+- Parses userland ELF files from the FAT32 application disk and starts them as
   Ring 3 tasks.
 - Provides minimal GUI syscalls for clearing the screen, drawing rectangles,
   and drawing scaled bitmap text.
-- Starts a passive userland GUI ELF that paints the desktop background.
-- Starts a second userland shell ELF with a single interactive shell window.
+- Starts a passive userland GUI ELF that paints a MATE-style desktop frame with
+  a top menu panel and a bottom task list for window switching.
+- Prefers a real `BASH.ELF` in task slot 1. Until that port links, starts the
+  old Rust terminal ELF only as a temporary fallback.
 - Starts a third userland task viewer ELF that displays the running user tasks.
 - Starts a fourth userland C `cat` ELF based on the original V7 UNIX `cat.c`
   program body and prints a FAT32 file through a small Linux-like syscall
   compatibility layer.
+- Selects Linux/POSIX syscall handling by task ABI, so future Linux-compatible
+  user programs are not tied to hard-coded kernel task names.
+- Includes a GNU Bash port staging area under `ports/bash` and fetches upstream
+  Bash 5.3 sources into ignored `third_party` storage.
 - Uses a generated monospace bitmap font for GUI text.
 - Tracks a generic focused user-task slot so userland can build taskbar/window
   switching without making the kernel depend on specific GUI programs.
@@ -51,9 +57,10 @@ FAT32 application disk.
   switch, and Ring 3 entry.
 - `src/services.rs`: kernel-side framebuffer service used by GUI syscalls.
 - `src/mouse.rs`: tiny PS/2 mouse packet decoder.
-- `src/linux_abi.rs`: first Linux-like syscall compatibility path for the C
-  `cat` process, including basic file I/O, `openat`, `fstat`, `lseek`, `brk`,
-  `uname`, and exit syscalls.
+- `src/linux_abi.rs`: Linux/POSIX syscall compatibility path for Linux ABI
+  user tasks, including basic file I/O, keyboard-backed stdin, `openat`,
+  `fstat`, `lseek`, `brk`, `uname`, `getcwd`, `access`, `ioctl`, UID/GID
+  queries, signal setup stubs, and exit syscalls.
 - `src/font.rs`: generated fixed-size monospace bitmap font.
 - `src/framebuffer.rs`: low-level pixel and rectangle drawing.
 - `src/limine.rs`: Limine framebuffer, HHDM, and kernel address requests.
@@ -68,6 +75,7 @@ FAT32 application disk.
 - `user/cat/src/cat.c`: separate C `cat` executable using the V7 UNIX `cat.c`
   program body with a tiny local runtime.
 - `user/cat/linker.ld`: cat ELF linker script.
+- `ports/bash/`: staging notes and fetch script for the real GNU Bash port.
 
 ## Install Tools
 
@@ -107,13 +115,16 @@ The build script creates both:
 - `build/user/shell.elf`: the separate userland shell executable.
 - `build/user/taskview.elf`: the separate userland task viewer executable.
 - `build/user/cat.elf`: the separate userland C cat executable.
+- `build/user/bash.elf`: optional future GNU Bash executable; when present it
+  is copied to the app disk as `BASH.ELF` and replaces the fallback terminal.
 - `build/nk-apps.fat32`: the FAT32 disk image containing the user programs.
 
 The ISO only contains the kernel and bootloader files. User programs are loaded
 from the FAT32 application disk at runtime.
 
 Building `cat.elf` requires `clang` and `rust-lld` because it is a C userland
-program rather than a Rust executable.
+program rather than a Rust executable. The Bash port is staged but not yet
+linked; see `ports/bash/PORT.md`.
 
 ## Run in QEMU
 
@@ -157,10 +168,10 @@ $disk = "$PWD\build\virtio-test.img"
 
 ## Next Useful Steps
 
-- Add a compositor/window manager so GUI and shell windows no longer draw
-  directly into the shared framebuffer.
-- Replace the temporary Rust mini-shell with a real port of GNU Bash once the
-  POSIX process model is ready.
+- Add a real compositor/window manager so applications submit private window
+  buffers instead of drawing directly into the shared framebuffer.
+- Finish the real GNU Bash port: the kernel already prefers `BASH.ELF`, but the
+  port still needs the POSIX process model listed below.
 - Add `fork`, `execve`, `waitpid`, pipes, signals, termios/TTY handling, and
   argv/envp/auxv setup for Bash and other real Linux/POSIX programs.
 - Load a real PSF/SSFN font from the app disk instead of compiling the generated

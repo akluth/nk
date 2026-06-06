@@ -1,6 +1,10 @@
 use core::arch::global_asm;
 
-use crate::{arch, gdt, keyboard, linux_abi, mouse, scheduler, serial, services};
+use crate::{
+    arch, gdt, keyboard, linux_abi, mouse,
+    scheduler::{self, UserAbi},
+    serial, services,
+};
 
 const IDT_ENTRIES: usize = 256;
 const GENERAL_PROTECTION_VECTOR: u8 = 13;
@@ -479,7 +483,9 @@ extern "C" fn rust_unhandled_interrupt(_frame: *mut scheduler::TrapFrame) {
 #[no_mangle]
 extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
     let frame = unsafe { &mut *frame };
-    if scheduler::current_user_name() == Some("cat") && linux_abi::handle_syscall(frame) {
+    if matches!(scheduler::current_user_abi(), Some(UserAbi::Linux))
+        && linux_abi::handle_syscall(frame)
+    {
         return;
     }
 

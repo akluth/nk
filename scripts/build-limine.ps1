@@ -137,13 +137,24 @@ Build-UserProgram "gui"
 Build-UserProgram "shell"
 Build-UserProgram "taskview"
 Build-CUserProgram "cat"
-Invoke-Checked python (Join-Path $Root "scripts\make-fat32.py") `
-    (Join-Path $Build "nk-apps.fat32") `
-    (Join-Path $Build "user\gui.elf") `
-    (Join-Path $Build "user\shell.elf") `
-    (Join-Path $Build "user\taskview.elf") `
-    (Join-Path $Build "user\cat.elf") `
-    (Join-Path $Root "apps\HELLO.TXT")
+
+$AppFiles = @(
+    (Join-Path $Build "user\gui.elf"),
+    (Join-Path $Build "user\shell.elf"),
+    (Join-Path $Build "user\taskview.elf"),
+    (Join-Path $Build "user\cat.elf")
+)
+$BashElf = Join-Path $Build "user\bash.elf"
+if (Test-Path $BashElf) {
+    $AppFiles += $BashElf
+}
+$AppFiles += (Join-Path $Root "apps\HELLO.TXT")
+
+$MakeFatArgs = @(
+    (Join-Path $Root "scripts\make-fat32.py"),
+    (Join-Path $Build "nk-apps.fat32")
+) + $AppFiles
+Invoke-Checked python @MakeFatArgs
 
 Copy-Item (Join-Path $Root "target\x86_64-unknown-none\release\nk") (Join-Path $IsoRoot "boot\nk")
 Copy-Item (Join-Path $Root "limine.conf") (Join-Path $IsoRoot "boot\limine.conf")

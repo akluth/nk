@@ -67,7 +67,6 @@ impl UserPage {
             bytes: [0; PAGE_SIZE as usize],
         }
     }
-
 }
 
 #[repr(align(4096))]
@@ -161,7 +160,14 @@ pub fn create_user_address_space(
         link_table(tables, kernel, pml4, pml4_index, kernel_pdpt, 0);
         link_table(tables, kernel, kernel_pdpt, pdpt_index, kernel_pd, 0);
         for table in 0..KERNEL_PT_COUNT {
-            link_table(tables, kernel, kernel_pd, pd_index + table, kernel_pts + table, 0);
+            link_table(
+                tables,
+                kernel,
+                kernel_pd,
+                pd_index + table,
+                kernel_pts + table,
+                0,
+            );
         }
 
         for page in 0..KERNEL_MAPPED_PAGES {
@@ -260,7 +266,11 @@ unsafe fn map_page(
     tables[table].0[entry] = phys | PTE_PRESENT | PTE_WRITABLE | extra_flags;
 }
 
-unsafe fn table_phys(tables: &[PageTable; TABLE_COUNT], kernel: KernelAddress, index: usize) -> u64 {
+unsafe fn table_phys(
+    tables: &[PageTable; TABLE_COUNT],
+    kernel: KernelAddress,
+    index: usize,
+) -> u64 {
     virt_to_phys(tables[index].0.as_ptr() as u64, kernel)
 }
 

@@ -7,16 +7,16 @@ mod fat32;
 mod font;
 mod framebuffer;
 mod gdt;
-mod ipc;
 mod interrupts;
+mod ipc;
 mod keyboard;
-mod linux_abi;
 mod limine;
+mod linux_abi;
 mod memory;
 mod mouse;
 mod pci;
-mod serial;
 mod scheduler;
+mod serial;
 mod services;
 mod userland;
 mod virtio;
@@ -30,7 +30,10 @@ pub extern "C" fn _start() -> ! {
 }
 
 mod microkernel {
-    use crate::{arch, ata, fat32, gdt, interrupts, ipc, limine, memory, scheduler, serial, services, userland, virtio};
+    use crate::{
+        arch, ata, fat32, gdt, interrupts, ipc, limine, memory, scheduler, serial, services,
+        userland, virtio,
+    };
 
     pub struct Kernel {
         scheduler: scheduler::Scheduler,
@@ -52,7 +55,8 @@ mod microkernel {
             self.scheduler.spawn("desktop");
             self.scheduler.spawn("idle");
             scheduler::install(self.scheduler);
-            self.ipc.publish(ipc::Message::new("kernel", "desktop", "paint"));
+            self.ipc
+                .publish(ipc::Message::new("kernel", "desktop", "paint"));
 
             let mut framebuffer_mapping = None;
             if let Some(fb) = limine::framebuffer() {
@@ -74,7 +78,9 @@ mod microkernel {
             userland::init();
             let mut can_enter_user = false;
             if let Some(kernel_address) = limine::kernel_address() {
-                if let Some(root) = memory::create_user_address_space(kernel_address, framebuffer_mapping) {
+                if let Some(root) =
+                    memory::create_user_address_space(kernel_address, framebuffer_mapping)
+                {
                     userland::install_page_table_root(root);
                     can_enter_user = true;
                 }

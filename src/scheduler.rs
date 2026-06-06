@@ -39,8 +39,15 @@ pub struct Scheduler {
 }
 
 #[derive(Clone, Copy)]
+pub enum UserAbi {
+    Native,
+    Linux,
+}
+
+#[derive(Clone, Copy)]
 struct UserTask {
     name: &'static str,
+    abi: UserAbi,
     initial_frame: TrapFrame,
     frame: TrapFrame,
     ticks: u64,
@@ -74,6 +81,7 @@ impl UserTask {
     const fn empty() -> Self {
         Self {
             name: "",
+            abi: UserAbi::Native,
             initial_frame: Self::EMPTY_FRAME,
             frame: Self::EMPTY_FRAME,
             ticks: 0,
@@ -105,13 +113,14 @@ impl UserScheduler {
         }
     }
 
-    fn install(&mut self, index: usize, name: &'static str, frame: TrapFrame) {
+    fn install(&mut self, index: usize, name: &'static str, abi: UserAbi, frame: TrapFrame) {
         if index >= USER_TASKS {
             return;
         }
 
         self.tasks[index] = UserTask {
             name,
+            abi,
             initial_frame: frame,
             frame,
             ticks: 0,
@@ -163,11 +172,11 @@ impl UserScheduler {
         })
     }
 
-    fn current_name(&self) -> Option<&'static str> {
+    fn current_abi(&self) -> Option<UserAbi> {
         if self.installed == 0 || !self.tasks[self.current].active {
             None
         } else {
-            Some(self.tasks[self.current].name)
+            Some(self.tasks[self.current].abi)
         }
     }
 
@@ -227,7 +236,8 @@ unsafe impl Sync for GlobalScheduler {}
 unsafe impl Sync for GlobalUserScheduler {}
 
 static SCHEDULER: GlobalScheduler = GlobalScheduler(UnsafeCell::new(None));
-static USER_SCHEDULER: GlobalUserScheduler = GlobalUserScheduler(UnsafeCell::new(UserScheduler::new()));
+static USER_SCHEDULER: GlobalUserScheduler =
+    GlobalUserScheduler(UnsafeCell::new(UserScheduler::new()));
 
 impl Scheduler {
     pub const fn new() -> Self {
@@ -278,9 +288,9 @@ pub fn tick() -> u64 {
     }
 }
 
-pub fn install_user_task(index: usize, name: &'static str, frame: TrapFrame) {
+pub fn install_user_task(index: usize, name: &'static str, abi: UserAbi, frame: TrapFrame) {
     unsafe {
-        (*USER_SCHEDULER.0.get()).install(index, name, frame);
+        (*USER_SCHEDULER.0.get()).install(index, name, abi, frame);
     }
 }
 
@@ -306,8 +316,8 @@ pub fn user_task_info(index: usize) -> Option<UserTaskSnapshot> {
     unsafe { (*USER_SCHEDULER.0.get()).task_info(index) }
 }
 
-pub fn current_user_name() -> Option<&'static str> {
-    unsafe { (*USER_SCHEDULER.0.get()).current_name() }
+pub fn current_user_abi() -> Option<UserAbi> {
+    unsafe { (*USER_SCHEDULER.0.get()).current_abi() }
 }
 
 pub fn exit_current_user(frame: &mut TrapFrame) -> bool {

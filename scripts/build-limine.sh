@@ -63,7 +63,18 @@ build_user_program gui
 build_user_program shell
 build_user_program taskview
 build_c_user_program cat
-python3 "$ROOT/scripts/make-fat32.py" "$BUILD/nk-apps.fat32" "$BUILD/user/gui.elf" "$BUILD/user/shell.elf" "$BUILD/user/taskview.elf" "$BUILD/user/cat.elf" "$ROOT/apps/HELLO.TXT"
+
+app_files=(
+  "$BUILD/user/gui.elf"
+  "$BUILD/user/shell.elf"
+  "$BUILD/user/taskview.elf"
+  "$BUILD/user/cat.elf"
+)
+if [ -f "$BUILD/user/bash.elf" ]; then
+  app_files+=("$BUILD/user/bash.elf")
+fi
+app_files+=("$ROOT/apps/HELLO.TXT")
+python3 "$ROOT/scripts/make-fat32.py" "$BUILD/nk-apps.fat32" "${app_files[@]}"
 
 cp "$ROOT/target/x86_64-unknown-none/release/nk" "$ISO_ROOT/boot/nk"
 cp "$ROOT/limine.conf" "$ISO_ROOT/boot/limine.conf"

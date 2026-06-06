@@ -60,10 +60,7 @@ struct QueueMemory {
     used: UsedRing,
 }
 
-static mut QUEUES: [QueueMemory; 2] = [
-    QueueMemory::new(),
-    QueueMemory::new(),
-];
+static mut QUEUES: [QueueMemory; 2] = [QueueMemory::new(), QueueMemory::new()];
 
 impl QueueMemory {
     const fn new() -> Self {

@@ -13,11 +13,12 @@ const SYS_SET_ACTIVE_WINDOW: u64 = 25;
 const SYS_ACTIVE_WINDOW: u64 = 26;
 const SYS_SHUTDOWN: u64 = 32;
 
-const BG: u32 = 0x00191d24;
-const PANEL: u32 = 0x00282f3a;
+const BG: u32 = 0x002e3436;
+const PANEL: u32 = 0x00eeeeec;
+const PANEL_DARK: u32 = 0x00d3d7cf;
 const ACCENT: u32 = 0x0000b894;
-const ACTIVE_TAB: u32 = 0x005f6f86;
-const INACTIVE_TAB: u32 = 0x00343d4a;
+const ACTIVE_TAB: u32 = 0x0087a556;
+const INACTIVE_TAB: u32 = 0x00babdb6;
 const SHADOW: u32 = 0x000d1117;
 const WINDOW: u32 = 0x00f3f5f7;
 const TITLE: u32 = 0x00343d4a;
@@ -106,7 +107,7 @@ pub extern "C" fn _start() -> ! {
             if dragging {
                 draw_desktop();
                 x = mouse.x.saturating_sub(drag_dx).clamp(20, 720);
-                y = mouse.y.saturating_sub(drag_dy).clamp(50, 420);
+                y = mouse.y.saturating_sub(drag_dy).clamp(44, 330);
                 redraw_if_active(x, y, &input, len, output, mouse);
             } else {
                 repair_pointer(previous, mouse, x, y, &input, len, output);
@@ -149,25 +150,33 @@ fn redraw_window(x: u64, y: u64, input: &[u8; 32], len: usize, output: Output, m
 }
 
 fn draw_desktop() {
-    rect(0, 36, 1280, 684, BG);
-    draw_taskbar();
+    rect(0, 28, 1280, 656, BG);
+    draw_panels();
 }
 
-fn draw_taskbar() {
-    rect(0, 0, 1280, 36, PANEL);
-    rect(18, 10, 16, 16, ACCENT);
+fn draw_panels() {
+    rect(0, 0, 1280, 28, PANEL);
+    rect(0, 27, 1280, 1, PANEL_DARK);
+    rect(10, 7, 14, 14, ACCENT);
+    text(34, 5, b"Applications", INK);
+    text(164, 5, b"Places", INK);
+    text(244, 5, b"System", INK);
+    text(1132, 5, b"nk desktop", INK);
+
+    rect(0, 684, 1280, 36, PANEL);
+    rect(0, 684, 1280, 1, PANEL_DARK);
     let focus = active_window();
-    taskbar_entry(52, b"shell", focus == TASK_SHELL);
-    taskbar_entry(170, b"tasks", focus == TASK_TASKVIEW);
-    taskbar_entry(288, b"cat", focus == TASK_CAT);
+    taskbar_entry(10, b"terminal", focus == TASK_SHELL);
+    taskbar_entry(160, b"tasks", focus == TASK_TASKVIEW);
+    taskbar_entry(310, b"cat", focus == TASK_CAT);
 }
 
 fn taskbar_entry(x: u64, label: &'static [u8], active: bool) {
     let bg = if active { ACTIVE_TAB } else { INACTIVE_TAB };
-    let fg = if active { LIGHT } else { 0x00d2d8e2 };
-    rect(x, 4, 108, 28, bg);
-    rect(x, 4, 108, 2, fg);
-    text(x + 12, 8, label, fg);
+    let fg = if active { LIGHT } else { INK };
+    rect(x, 690, 138, 24, bg);
+    rect(x, 690, 138, 2, fg);
+    text(x + 12, 692, label, fg);
 }
 
 fn draw_shell(x: u64, y: u64, input: &[u8; 32], len: usize, output: Output) {
@@ -213,8 +222,8 @@ fn repair_pointer(
 }
 
 fn restore_desktop_at(x: u64, y: u64) {
-    if y < 36 {
-        draw_taskbar();
+    if !(28..684).contains(&y) {
+        draw_panels();
     } else {
         rect(x.saturating_sub(2), y.saturating_sub(2), 22, 26, BG);
     }
@@ -254,15 +263,15 @@ fn active_window() -> u64 {
 }
 
 fn hit_taskbar(mouse: Mouse) -> bool {
-    mouse.y < 36
+    mouse.y >= 684
 }
 
 fn set_active_from_taskbar(mouse: Mouse) {
-    let id = if mouse.x >= 52 && mouse.x < 152 {
+    let id = if mouse.x >= 10 && mouse.x < 148 {
         TASK_SHELL
-    } else if mouse.x >= 170 && mouse.x < 270 {
+    } else if mouse.x >= 160 && mouse.x < 298 {
         TASK_TASKVIEW
-    } else if mouse.x >= 288 && mouse.x < 388 {
+    } else if mouse.x >= 310 && mouse.x < 448 {
         TASK_CAT
     } else {
         0

@@ -87,7 +87,12 @@ pub fn read_bar(device: Device, index: u8) -> Bar {
 }
 
 pub fn read_cap_u8(device: Device, offset: u8, field: u8) -> u8 {
-    read_u8(device.bus, device.slot, device.function, offset.wrapping_add(field))
+    read_u8(
+        device.bus,
+        device.slot,
+        device.function,
+        offset.wrapping_add(field),
+    )
 }
 
 pub fn read_cap_u32(device: Device, offset: u8, field: u8) -> u32 {

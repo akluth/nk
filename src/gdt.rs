@@ -60,7 +60,11 @@ pub fn init() {
         GDT[2] = data_descriptor(0);
         GDT[3] = data_descriptor(3);
         GDT[4] = code_descriptor(3);
-        set_tss_descriptor(5, core::ptr::addr_of!(TSS) as u64, core::mem::size_of::<Tss>() as u32 - 1);
+        set_tss_descriptor(
+            5,
+            core::ptr::addr_of!(TSS) as u64,
+            core::mem::size_of::<Tss>() as u32 - 1,
+        );
 
         let pointer = GdtPointer {
             limit: (core::mem::size_of::<[u64; 7]>() - 1) as u16,

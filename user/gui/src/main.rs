@@ -12,12 +12,14 @@ const SYS_SET_FOCUS: u64 = 25;
 const SYS_FOCUS: u64 = 26;
 const SYS_TASK_COUNT: u64 = 22;
 
-const BG: u32 = 0x00191d24;
-const PANEL: u32 = 0x00282f3a;
-const ACTIVE: u32 = 0x005f6f86;
-const INACTIVE: u32 = 0x00343d4a;
-const LIGHT: u32 = 0x00f3f5f7;
-const ACCENT: u32 = 0x0000b894;
+const BG: u32 = 0x002e3436;
+const PANEL: u32 = 0x00eeeeec;
+const PANEL_DARK: u32 = 0x00d3d7cf;
+const ACTIVE: u32 = 0x0087a556;
+const INACTIVE: u32 = 0x00babdb6;
+const INK: u32 = 0x002e3436;
+const LIGHT: u32 = 0x00ffffff;
+const ACCENT: u32 = 0x004e9a06;
 
 #[derive(Clone, Copy)]
 struct Mouse {
@@ -35,11 +37,11 @@ pub extern "C" fn _start() -> ! {
         let mouse = read_mouse();
         if mouse.seq != last_seq {
             last_seq = mouse.seq;
-            if mouse.buttons & 1 != 0 && mouse.y < 36 {
+            if mouse.buttons & 1 != 0 && mouse.y >= 684 {
                 click_taskbar(mouse.x);
             }
         }
-        draw_taskbar();
+        draw_panels();
         for _ in 0..20 {
             syscall0(SYS_YIELD);
         }
@@ -48,24 +50,32 @@ pub extern "C" fn _start() -> ! {
 
 fn draw_background() {
     syscall1(SYS_GUI_CLEAR, BG as u64);
-    draw_taskbar();
+    draw_panels();
 }
 
-fn draw_taskbar() {
-    rect(0, 0, 1280, 36, PANEL);
-    rect(18, 10, 16, 16, ACCENT);
+fn draw_panels() {
+    rect(0, 0, 1280, 28, PANEL);
+    rect(0, 27, 1280, 1, PANEL_DARK);
+    rect(10, 7, 14, 14, ACCENT);
+    text(34, 5, b"Applications", INK);
+    text(164, 5, b"Places", INK);
+    text(244, 5, b"System", INK);
+    text(1132, 5, b"nk desktop", INK);
+
+    rect(0, 684, 1280, 36, PANEL);
+    rect(0, 684, 1280, 1, PANEL_DARK);
     let focus = syscall0(SYS_FOCUS);
     let _count = syscall0(SYS_TASK_COUNT);
-    taskbar_entry(52, 1, focus == 1);
-    taskbar_entry(170, 2, focus == 2);
-    taskbar_entry(288, 3, focus == 3);
+    taskbar_entry(10, 1, focus == 1);
+    taskbar_entry(160, 2, focus == 2);
+    taskbar_entry(310, 3, focus == 3);
 }
 
 fn taskbar_entry(x: u64, index: u64, active: bool) {
     let bg = if active { ACTIVE } else { INACTIVE };
-    let fg = if active { LIGHT } else { 0x00d2d8e2 };
-    rect(x, 6, 108, 24, bg);
-    text(x + 12, 8, label(index), fg);
+    let fg = if active { LIGHT } else { INK };
+    rect(x, 690, 138, 24, bg);
+    text(x + 12, 692, label(index), fg);
 }
 
 fn label(index: u64) -> &'static [u8] {
@@ -78,11 +88,11 @@ fn label(index: u64) -> &'static [u8] {
 }
 
 fn click_taskbar(mouse_x: u64) {
-    let id = if mouse_x >= 52 && mouse_x < 160 {
+    let id = if mouse_x >= 10 && mouse_x < 148 {
         1
-    } else if mouse_x >= 170 && mouse_x < 278 {
+    } else if mouse_x >= 160 && mouse_x < 298 {
         2
-    } else if mouse_x >= 288 && mouse_x < 396 {
+    } else if mouse_x >= 310 && mouse_x < 448 {
         3
     } else {
         0
