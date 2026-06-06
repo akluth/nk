@@ -34,7 +34,7 @@ function Test-TarGz {
     if (-not (Test-Path $Path) -or (Get-Item $Path).Length -lt 1024) {
         return $false
     }
-    tar -tzf $Path > $null
+    tar --force-local -tzf $Path > $null
     return $LASTEXITCODE -eq 0
 }
 
@@ -49,7 +49,7 @@ if (-not (Test-TarGz $Archive)) {
 
 if (-not (Test-Path (Join-Path $Source "configure"))) {
     Remove-Item -LiteralPath $Source -Recurse -Force -ErrorAction SilentlyContinue
-    tar -xzf $Archive -C $ThirdParty
+    tar --force-local -xzf $Archive -C $ThirdParty
     if ($LASTEXITCODE -ne 0) {
         Remove-Item -LiteralPath $Source -Recurse -Force -ErrorAction SilentlyContinue
         throw "Failed to extract Bash archive: $Archive"
