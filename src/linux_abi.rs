@@ -321,7 +321,10 @@ fn fork(frame: &scheduler::TrapFrame) -> i64 {
     if !memory::copy_user_space(parent, CHILD_SLOT) {
         return EINVAL;
     }
-    scheduler::fork_current_user_to(CHILD_SLOT, frame).unwrap_or(CHILD_PID) as i64
+    let Some(child_pml4) = userland::task_pml4(CHILD_SLOT) else {
+        return EINVAL;
+    };
+    scheduler::fork_current_user_to(CHILD_SLOT, child_pml4, frame).unwrap_or(CHILD_PID) as i64
 }
 
 fn execve(frame: &mut scheduler::TrapFrame, path: *const u8, argv: *const u64) -> i64 {

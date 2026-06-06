@@ -197,8 +197,11 @@ pub fn install_first_task() {
         serial::write_line("nk: bash elf missing; no terminal process installed");
     }
     install_user_elf(2, "taskviewer", UserAbi::Native, b"TASKVIEWELF");
-    install_user_elf(3, "cat", UserAbi::Linux, b"CAT     ELF");
-    scheduler::set_user_task_active(3, false);
+    serial::write_line("nk: cat elf available on fat32 for on-demand exec");
+}
+
+pub fn task_pml4(index: usize) -> Option<u64> {
+    unsafe { (*USER_ADDRESS_SPACE.0.get()).root(index).map(|root| root.pml4_phys()) }
 }
 
 fn install_user_elf(index: usize, name: &'static str, abi: UserAbi, fat_name: &[u8; 11]) -> bool {

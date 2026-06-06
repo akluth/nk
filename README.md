@@ -38,7 +38,7 @@ FAT32 application disk.
   switching without making the kernel depend on specific GUI programs.
 - Delivers PS/2 keyboard input through IRQ1 and a small `read_key` syscall.
 - Delivers PS/2 mouse input through IRQ12 and a small `read_mouse` syscall.
-- Bash can start the separate `CAT.ELF` user task through the minimal
+- Bash can start the separate `CAT.ELF` user task on demand through the minimal
   `fork`/`execve`/`wait4` path; `cat hello.txt` reads `HELLO.TXT` from the
   FAT32 application disk.
 

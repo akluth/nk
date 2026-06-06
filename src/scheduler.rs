@@ -269,12 +269,16 @@ impl UserScheduler {
         None
     }
 
-    fn fork_current_to(&mut self, child: usize, frame: &TrapFrame) -> Option<u64> {
+    fn fork_current_to(
+        &mut self,
+        child: usize,
+        child_pml4: u64,
+        frame: &TrapFrame,
+    ) -> Option<u64> {
         if child >= USER_TASKS || self.installed == 0 {
             return None;
         }
 
-        let child_pml4 = self.tasks[child].pml4_phys;
         let mut child_task = self.tasks[self.current];
         child_task.name = "child";
         child_task.pml4_phys = child_pml4;
@@ -410,19 +414,6 @@ impl UserScheduler {
         WaitResult::NoChild
     }
 
-    fn set_active(&mut self, index: usize, active: bool) {
-        if index >= self.installed {
-            return;
-        }
-        self.tasks[index].active = active;
-        if active {
-            self.tasks[index].waiting_stdin = false;
-            self.tasks[index].stdin_buffer = 0;
-            self.tasks[index].waiting_child = false;
-            self.tasks[index].zombie = false;
-        }
-    }
-
     fn restart(&mut self, index: usize) -> bool {
         if index < self.installed {
             self.tasks[index].frame = self.tasks[index].initial_frame;
@@ -533,12 +524,6 @@ pub fn replace_user_task_frame(index: usize, name: &'static str, abi: UserAbi, f
     }
 }
 
-pub fn set_user_task_active(index: usize, active: bool) {
-    unsafe {
-        (*USER_SCHEDULER.0.get()).set_active(index, active);
-    }
-}
-
 pub fn first_user_frame() -> Option<TrapFrame> {
     unsafe { (*USER_SCHEDULER.0.get()).first_frame() }
 }
@@ -559,8 +544,8 @@ pub fn wake_stdin_waiter() -> Option<StdinWake> {
     unsafe { (*USER_SCHEDULER.0.get()).wake_stdin_waiter() }
 }
 
-pub fn fork_current_user_to(child: usize, frame: &TrapFrame) -> Option<u64> {
-    unsafe { (*USER_SCHEDULER.0.get()).fork_current_to(child, frame) }
+pub fn fork_current_user_to(child: usize, child_pml4: u64, frame: &TrapFrame) -> Option<u64> {
+    unsafe { (*USER_SCHEDULER.0.get()).fork_current_to(child, child_pml4, frame) }
 }
 
 pub fn wait_for_child(frame: &mut TrapFrame, pid: i32) -> WaitResult {

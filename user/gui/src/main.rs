@@ -256,7 +256,7 @@ fn draw_task_row(x: u64, y: u64, info: u64) {
         1 => b"gui" as &[u8],
         2 => b"bash",
         3 => b"taskviewer",
-        4 => b"child/cat",
+        4 => b"child",
         _ => b"unknown",
     };
     let state = if current {
