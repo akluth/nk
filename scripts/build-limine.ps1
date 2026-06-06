@@ -106,6 +106,19 @@ function Build-CUserProgram {
         $Obj
 }
 
+function Ensure-BashProgram {
+    $BashPortElf = Join-Path $Root "third_party\bash-5.3\bash"
+    $BashOut = Join-Path $Build "user\bash.elf"
+    if (-not (Test-Path $BashPortElf)) {
+        Invoke-Checked powershell -ExecutionPolicy Bypass -File (Join-Path $Root "ports\bash\fetch-bash.ps1")
+        Invoke-Checked powershell -ExecutionPolicy Bypass -File (Join-Path $Root "ports\bash\build-bash.ps1")
+    }
+    if (-not (Test-Path $BashPortElf)) {
+        throw "Bash wurde nicht gebaut. Erwartet: $BashPortElf"
+    }
+    Copy-Item $BashPortElf $BashOut
+}
+
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "cargo wurde nicht gefunden. Starte scripts\install-tools-admin.ps1 in einer Administrator-PowerShell."
 }
@@ -136,10 +149,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $IsoRoot "EFI\BOOT") | Out-
 Build-UserProgram "gui"
 Build-UserProgram "taskview"
 Build-CUserProgram "cat"
-$BashPortElf = Join-Path $Root "third_party\bash-5.3\bash"
-if (Test-Path $BashPortElf) {
-    Copy-Item $BashPortElf (Join-Path $Build "user\bash.elf")
-}
+Ensure-BashProgram
 
 $AppFiles = @(
     (Join-Path $Build "user\gui.elf"),
@@ -147,9 +157,7 @@ $AppFiles = @(
     (Join-Path $Build "user\cat.elf")
 )
 $BashElf = Join-Path $Build "user\bash.elf"
-if (Test-Path $BashElf) {
-    $AppFiles += $BashElf
-}
+$AppFiles += $BashElf
 $AppFiles += (Join-Path $Root "apps\HELLO.TXT")
 
 $MakeFatArgs = @(

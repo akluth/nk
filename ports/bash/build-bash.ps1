@@ -5,14 +5,20 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path "$PSScriptRoot\..\.."
 $Source = Join-Path $Root "third_party\bash-5.3"
+$Tools = Join-Path $Root "third_party\tools"
 $Zig = Join-Path $Root "third_party\tools\zig-x86_64-windows-$ZigVersion\zig.exe"
+$ZigArchive = Join-Path $Tools "zig-x86_64-windows-$ZigVersion.zip"
 $MsysBash = "C:\tools\msys64\usr\bin\bash.exe"
 
 if (-not (Test-Path $Source)) {
     throw "Bash source missing. Run ports\bash\fetch-bash.ps1 first."
 }
 if (-not (Test-Path $Zig)) {
-    throw "Portable Zig missing at $Zig. Install or extract Zig before building Bash."
+    New-Item -ItemType Directory -Force -Path $Tools | Out-Null
+    if (-not (Test-Path $ZigArchive)) {
+        Invoke-WebRequest -Uri "https://ziglang.org/download/$ZigVersion/zig-x86_64-windows-$ZigVersion.zip" -OutFile $ZigArchive
+    }
+    Expand-Archive -LiteralPath $ZigArchive -DestinationPath $Tools -Force
 }
 if (-not (Test-Path $MsysBash)) {
     throw "MSYS2 bash missing at $MsysBash."

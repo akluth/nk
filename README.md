@@ -115,17 +115,19 @@ The build script creates both:
 - `build/user/gui.elf`: the separate userland GUI executable.
 - `build/user/taskview.elf`: the separate userland task viewer executable.
 - `build/user/cat.elf`: the separate userland C cat executable.
-- `build/user/bash.elf`: GNU Bash executable; it is copied to the app disk as
-  `BASH.ELF` and started as the standard terminal process.
+- `build/user/bash.elf`: GNU Bash executable; the normal build fetches/builds
+  it on demand, copies it to the app disk as `BASH.ELF`, and starts it as the
+  standard terminal process.
 - `build/nk-apps.fat32`: the FAT32 disk image containing the user programs.
 
 The ISO only contains the kernel and bootloader files. User programs are loaded
 from the FAT32 application disk at runtime.
 
 Building `cat.elf` requires `clang` and `rust-lld` because it is a C userland
-program rather than a Rust executable. Building Bash requires MSYS2 `make`,
-MSYS2 `gcc` for host build tools, and portable Zig for the static Musl target;
-see `ports/bash/PORT.md`.
+program rather than a Rust executable. Building Bash requires network access on
+the first build, MSYS2 `make`, MSYS2 `gcc` for host build tools, and portable
+Zig for the static Musl target; the build script downloads Zig and Bash sources
+into ignored `third_party` storage when needed. See `ports/bash/PORT.md`.
 
 ## Run in QEMU
 

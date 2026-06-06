@@ -59,21 +59,70 @@ build_c_user_program() {
     "$BUILD/user/$name.o"
 }
 
+ensure_bash_program() {
+  local source="$ROOT/third_party/bash-5.3"
+  local bash_bin="$source/bash"
+  local tools="$ROOT/third_party/tools"
+  local zig_version="0.15.2"
+  local zig_dir="$tools/zig-x86_64-linux-$zig_version"
+  local zig="$zig_dir/zig"
+
+  mkdir -p "$ROOT/third_party" "$tools"
+  if [ ! -d "$source" ]; then
+    local archive="$ROOT/third_party/bash-5.3.tar.gz"
+    if [ ! -f "$archive" ]; then
+      curl -L "https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz" -o "$archive"
+    fi
+    tar -xzf "$archive" -C "$ROOT/third_party"
+  fi
+
+  if [ ! -x "$zig" ]; then
+    local zig_archive="$tools/zig-x86_64-linux-$zig_version.tar.xz"
+    if [ ! -f "$zig_archive" ]; then
+      curl -L "https://ziglang.org/download/$zig_version/zig-x86_64-linux-$zig_version.tar.xz" -o "$zig_archive"
+    fi
+    tar -xf "$zig_archive" -C "$tools"
+  fi
+
+  if [ ! -f "$bash_bin" ]; then
+    (
+      cd "$source"
+      make distclean >/dev/null 2>&1 || true
+      CC="$zig cc -target x86_64-linux-musl -static" \
+      LD="$zig cc -target x86_64-linux-musl -static" \
+      AR="$zig ar" \
+      RANLIB="$zig ranlib" \
+      CC_FOR_BUILD="gcc" \
+      CFLAGS_FOR_BUILD="-g -DCROSS_COMPILING -std=gnu17" \
+      CFLAGS="-Os -std=gnu89" \
+      LDFLAGS="-Wl,--image-base=0x40000000" \
+      ./configure --host=x86_64-linux-musl --build=x86_64-pc-linux-gnu \
+        --enable-static-link --disable-nls --without-bash-malloc --disable-threads \
+        --disable-readline --disable-history --disable-job-control \
+        --disable-help-builtin --disable-progcomp --disable-alias \
+        --disable-array-variables --disable-brace-expansion \
+        --disable-directory-stack --disable-dparen-arithmetic \
+        --disable-process-substitution --disable-net-redirections \
+        --disable-coprocesses --disable-command-timing --disable-select \
+        --disable-mem-scramble
+      make -j2
+    )
+  fi
+
+  cp "$bash_bin" "$BUILD/user/bash.elf"
+}
+
 build_user_program gui
 build_user_program taskview
 build_c_user_program cat
-if [ -f "$ROOT/third_party/bash-5.3/bash" ]; then
-  cp "$ROOT/third_party/bash-5.3/bash" "$BUILD/user/bash.elf"
-fi
+ensure_bash_program
 
 app_files=(
   "$BUILD/user/gui.elf"
   "$BUILD/user/taskview.elf"
   "$BUILD/user/cat.elf"
+  "$BUILD/user/bash.elf"
 )
-if [ -f "$BUILD/user/bash.elf" ]; then
-  app_files+=("$BUILD/user/bash.elf")
-fi
 app_files+=("$ROOT/apps/HELLO.TXT")
 python3 "$ROOT/scripts/make-fat32.py" "$BUILD/nk-apps.fat32" "${app_files[@]}"
 

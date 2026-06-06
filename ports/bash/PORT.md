@@ -40,7 +40,14 @@ The Linux compatibility path has basic support for:
 
 ## Build Bash
 
-Fetch and build the port on Windows:
+The normal OS build calls the Bash port automatically when `third_party` does
+not already contain a built Bash binary:
+
+```powershell
+.\scripts\build-limine.ps1
+```
+
+Manual fetch/build remains available on Windows:
 
 ```powershell
 .\ports\bash\fetch-bash.ps1
@@ -49,7 +56,9 @@ Fetch and build the port on Windows:
 ```
 
 The Bash binary is a static `x86_64-linux-musl` ELF linked at
-`0x40000000`, so it fits the current nk userland loader.
+`0x40000000`, so it fits the current nk userland loader. On a fresh checkout,
+the scripts download upstream Bash and portable Zig into ignored `third_party`
+storage as needed.
 
 ## Still Required
 
