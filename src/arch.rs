@@ -87,6 +87,13 @@ pub unsafe fn load_cr3(pml4_phys: u64) {
     asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack, preserves_flags));
 }
 
+#[inline(always)]
+pub unsafe fn read_cr3() -> u64 {
+    let pml4_phys: u64;
+    asm!("mov {}, cr3", out(reg) pml4_phys, options(nostack, preserves_flags));
+    pml4_phys
+}
+
 pub unsafe fn enable_sse() {
     asm!(
         "mov rax, cr0",

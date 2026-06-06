@@ -53,6 +53,7 @@ const ENOENT: i64 = -2;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 const ENOSYS: i64 = -38;
+const EAGAIN: i64 = -11;
 
 const USER_MMAP_START: u64 = 0x0000_0000_4010_0000;
 const USER_MMAP_END: u64 = 0x0000_0000_4017_0000;
@@ -85,7 +86,14 @@ static mut UNKNOWN_LOGS: u64 = 0;
 pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
     match frame.rax {
         SYS_READ => {
-            frame.rax = read(frame.rdi as i32, frame.rsi as *mut u8, frame.rdx as usize) as u64;
+            if let Some(result) = read(
+                frame,
+                frame.rdi as i32,
+                frame.rsi as *mut u8,
+                frame.rdx as usize,
+            ) {
+                frame.rax = result as u64;
+            }
             true
         }
         SYS_WRITE => {
@@ -267,49 +275,53 @@ fn open(path: *const u8) -> i64 {
     3
 }
 
-fn read(fd: i32, buffer: *mut u8, len: usize) -> i64 {
+fn read(frame: &mut scheduler::TrapFrame, fd: i32, buffer: *mut u8, len: usize) -> Option<i64> {
     if buffer.is_null() || len == 0 {
-        return 0;
+        return Some(0);
     }
     if fd == 0 {
-        return read_stdin(buffer, len);
+        return read_stdin(frame, buffer, len);
     }
     if fd != 3 {
-        return EBADF;
+        return Some(EBADF);
     }
 
     unsafe {
         let file = &mut *FILE3.0.get();
         let Some(data) = file.data else {
-            return EBADF;
+            return Some(EBADF);
         };
         if file.offset >= data.len() {
-            return 0;
+            return Some(0);
         }
 
         let count = len.min(data.len() - file.offset);
         core::ptr::copy_nonoverlapping(data.as_ptr().add(file.offset), buffer, count);
         file.offset += count;
-        count as i64
+        Some(count as i64)
     }
 }
 
-fn read_stdin(buffer: *mut u8, len: usize) -> i64 {
+fn read_stdin(frame: &mut scheduler::TrapFrame, buffer: *mut u8, len: usize) -> Option<i64> {
     if len == 0 {
-        return 0;
+        return Some(0);
     }
 
-    let key = loop {
-        if let Some(key) = keyboard::pop_key() {
-            break key as u8;
+    if let Some(key) = keyboard::pop_key() {
+        unsafe {
+            *buffer = key;
         }
-        crate::arch::halt();
-    };
-
-    unsafe {
-        *buffer = key;
+        return Some(1);
     }
-    1
+
+    if let Some(task_switch) = scheduler::block_current_for_stdin(frame, buffer as u64) {
+        unsafe {
+            crate::arch::load_cr3(task_switch.pml4_phys);
+        }
+        None
+    } else {
+        Some(EAGAIN)
+    }
 }
 
 fn write(fd: i32, buffer: *const u8, len: usize) -> i64 {

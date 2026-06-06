@@ -53,6 +53,8 @@ struct UserTask {
     frame: TrapFrame,
     ticks: u64,
     active: bool,
+    waiting_stdin: bool,
+    stdin_buffer: u64,
 }
 
 impl UserTask {
@@ -88,6 +90,8 @@ impl UserTask {
             frame: Self::EMPTY_FRAME,
             ticks: 0,
             active: false,
+            waiting_stdin: false,
+            stdin_buffer: 0,
         }
     }
 }
@@ -96,6 +100,12 @@ impl UserTask {
 pub struct UserSwitch {
     pub name: &'static str,
     pub pml4_phys: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct StdinWake {
+    pub pml4_phys: u64,
+    pub buffer: u64,
 }
 
 struct UserScheduler {
@@ -141,6 +151,8 @@ impl UserScheduler {
             frame,
             ticks: 0,
             active: true,
+            waiting_stdin: false,
+            stdin_buffer: 0,
         };
         self.installed = self.installed.max(index + 1);
     }
@@ -153,10 +165,9 @@ impl UserScheduler {
         self.tasks[self.current].frame = *frame;
         self.tasks[self.current].ticks = self.tasks[self.current].ticks.wrapping_add(1);
 
-        let mut next = (self.current + 1) % self.installed;
-        while !self.tasks[next].active {
-            next = (next + 1) % self.installed;
-        }
+        let Some(next) = self.next_active_from((self.current + 1) % self.installed) else {
+            return None;
+        };
 
         self.current = next;
         *frame = self.tasks[self.current].frame;
@@ -164,6 +175,50 @@ impl UserScheduler {
             name: self.tasks[self.current].name,
             pml4_phys: self.tasks[self.current].pml4_phys,
         })
+    }
+
+    fn next_active_from(&self, mut next: usize) -> Option<usize> {
+        for _ in 0..self.installed {
+            if self.tasks[next].active {
+                return Some(next);
+            }
+            next = (next + 1) % self.installed;
+        }
+        None
+    }
+
+    fn block_current_for_stdin(&mut self, frame: &mut TrapFrame, buffer: u64) -> Option<UserSwitch> {
+        if self.installed < 2 || frame.cs & 0x3 != 0x3 {
+            return None;
+        }
+
+        let current = self.current;
+        let next = self.next_active_from((current + 1) % self.installed)?;
+        self.tasks[current].frame = *frame;
+        self.tasks[current].active = false;
+        self.tasks[current].waiting_stdin = true;
+        self.tasks[current].stdin_buffer = buffer;
+        self.current = next;
+        *frame = self.tasks[self.current].frame;
+        Some(UserSwitch {
+            name: self.tasks[self.current].name,
+            pml4_phys: self.tasks[self.current].pml4_phys,
+        })
+    }
+
+    fn wake_stdin_waiter(&mut self) -> Option<StdinWake> {
+        for task in &mut self.tasks[..self.installed] {
+            if task.waiting_stdin {
+                task.waiting_stdin = false;
+                task.active = true;
+                task.frame.rax = 1;
+                return Some(StdinWake {
+                    pml4_phys: task.pml4_phys,
+                    buffer: task.stdin_buffer,
+                });
+            }
+        }
+        None
     }
 
     fn first_frame(&self) -> Option<TrapFrame> {
@@ -194,7 +249,7 @@ impl UserScheduler {
         let task = self.tasks[index];
         Some(UserTaskSnapshot {
             ticks: task.ticks,
-            active: task.active,
+            active: task.active || task.waiting_stdin,
             current: index == self.current,
         })
     }
@@ -213,6 +268,8 @@ impl UserScheduler {
         }
 
         self.tasks[self.current].active = false;
+        self.tasks[self.current].waiting_stdin = false;
+        self.tasks[self.current].stdin_buffer = 0;
         let mut next = (self.current + 1) % self.installed;
         for _ in 0..self.installed {
             if self.tasks[next].active {
@@ -232,12 +289,18 @@ impl UserScheduler {
             return;
         }
         self.tasks[index].active = active;
+        if active {
+            self.tasks[index].waiting_stdin = false;
+            self.tasks[index].stdin_buffer = 0;
+        }
     }
 
     fn restart(&mut self, index: usize) -> bool {
         if index < self.installed {
             self.tasks[index].frame = self.tasks[index].initial_frame;
             self.tasks[index].active = true;
+            self.tasks[index].waiting_stdin = false;
+            self.tasks[index].stdin_buffer = 0;
             self.focus = index;
             true
         } else {
@@ -343,6 +406,14 @@ pub fn first_user_pml4() -> Option<u64> {
 
 pub fn schedule_user(frame: &mut TrapFrame) -> Option<UserSwitch> {
     unsafe { (*USER_SCHEDULER.0.get()).schedule(frame) }
+}
+
+pub fn block_current_for_stdin(frame: &mut TrapFrame, buffer: u64) -> Option<UserSwitch> {
+    unsafe { (*USER_SCHEDULER.0.get()).block_current_for_stdin(frame, buffer) }
+}
+
+pub fn wake_stdin_waiter() -> Option<StdinWake> {
+    unsafe { (*USER_SCHEDULER.0.get()).wake_stdin_waiter() }
 }
 
 pub fn user_task_count() -> usize {

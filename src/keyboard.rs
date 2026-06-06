@@ -44,16 +44,18 @@ unsafe impl Sync for GlobalKeyboard {}
 
 static KEYBOARD: GlobalKeyboard = GlobalKeyboard(UnsafeCell::new(KeyboardBuffer::new()));
 
-pub fn push_scancode(scancode: u8) {
+pub fn push_key(byte: u8) {
+    unsafe {
+        (*KEYBOARD.0.get()).push(byte);
+    }
+}
+
+pub fn decode_scancode(scancode: u8) -> Option<u8> {
     if scancode & 0x80 != 0 {
-        return;
+        return None;
     }
 
-    if let Some(byte) = decode(scancode) {
-        unsafe {
-            (*KEYBOARD.0.get()).push(byte);
-        }
-    }
+    decode(scancode)
 }
 
 pub fn pop_key() -> Option<u8> {
