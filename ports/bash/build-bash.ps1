@@ -10,13 +10,49 @@ $Zig = Join-Path $Root "third_party\tools\zig-x86_64-windows-$ZigVersion\zig.exe
 $ZigArchive = Join-Path $Tools "zig-x86_64-windows-$ZigVersion.zip"
 $MsysBash = "C:\tools\msys64\usr\bin\bash.exe"
 
+function Invoke-Download {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Uri,
+        [Parameter(Mandatory = $true)] [string] $OutFile
+    )
+
+    $Temp = "$OutFile.download"
+    Remove-Item -LiteralPath $Temp -Force -ErrorAction SilentlyContinue
+    Invoke-WebRequest -Uri $Uri -OutFile $Temp
+    if (-not (Test-Path $Temp) -or (Get-Item $Temp).Length -eq 0) {
+        Remove-Item -LiteralPath $Temp -Force -ErrorAction SilentlyContinue
+        throw "Download failed or produced an empty file: $Uri"
+    }
+    Move-Item -LiteralPath $Temp -Destination $OutFile -Force
+}
+
+function Test-Zip {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+
+    if (-not (Test-Path $Path) -or (Get-Item $Path).Length -lt 1024) {
+        return $false
+    }
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $Zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        $Zip.Dispose()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 if (-not (Test-Path $Source)) {
     throw "Bash source missing. Run ports\bash\fetch-bash.ps1 first."
 }
 if (-not (Test-Path $Zig)) {
     New-Item -ItemType Directory -Force -Path $Tools | Out-Null
-    if (-not (Test-Path $ZigArchive)) {
-        Invoke-WebRequest -Uri "https://ziglang.org/download/$ZigVersion/zig-x86_64-windows-$ZigVersion.zip" -OutFile $ZigArchive
+    if (-not (Test-Zip $ZigArchive)) {
+        Remove-Item -LiteralPath $ZigArchive -Force -ErrorAction SilentlyContinue
+        Invoke-Download -Uri "https://ziglang.org/download/$ZigVersion/zig-x86_64-windows-$ZigVersion.zip" -OutFile $ZigArchive
+    }
+    if (-not (Test-Zip $ZigArchive)) {
+        throw "Downloaded Zig archive is invalid: $ZigArchive"
     }
     Expand-Archive -LiteralPath $ZigArchive -DestinationPath $Tools -Force
 }

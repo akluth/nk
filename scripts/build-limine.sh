@@ -60,6 +60,16 @@ build_c_user_program() {
 }
 
 ensure_bash_program() {
+  download_file() {
+    local url="$1"
+    local out="$2"
+    local tmp="$out.download"
+    rm -f "$tmp"
+    curl -fL "$url" -o "$tmp"
+    test -s "$tmp"
+    mv -f "$tmp" "$out"
+  }
+
   local source="$ROOT/third_party/bash-5.3"
   local bash_bin="$source/bash"
   local tools="$ROOT/third_party/tools"
@@ -68,18 +78,33 @@ ensure_bash_program() {
   local zig="$zig_dir/zig"
 
   mkdir -p "$ROOT/third_party" "$tools"
-  if [ ! -d "$source" ]; then
+  if [ ! -f "$source/configure" ]; then
     local archive="$ROOT/third_party/bash-5.3.tar.gz"
-    if [ ! -f "$archive" ]; then
-      curl -L "https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz" -o "$archive"
+    if [ ! -f "$archive" ] || ! tar -tzf "$archive" >/dev/null 2>&1; then
+      rm -f "$archive"
+      download_file "https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz" "$archive"
     fi
+    if ! tar -tzf "$archive" >/dev/null 2>&1; then
+      echo "Downloaded Bash archive is invalid: $archive" >&2
+      exit 1
+    fi
+    rm -rf "$source"
     tar -xzf "$archive" -C "$ROOT/third_party"
+    if [ ! -f "$source/configure" ]; then
+      echo "Extracted Bash source is incomplete: $source" >&2
+      exit 1
+    fi
   fi
 
   if [ ! -x "$zig" ]; then
     local zig_archive="$tools/zig-x86_64-linux-$zig_version.tar.xz"
-    if [ ! -f "$zig_archive" ]; then
-      curl -L "https://ziglang.org/download/$zig_version/zig-x86_64-linux-$zig_version.tar.xz" -o "$zig_archive"
+    if [ ! -f "$zig_archive" ] || ! tar -tf "$zig_archive" >/dev/null 2>&1; then
+      rm -f "$zig_archive"
+      download_file "https://ziglang.org/download/$zig_version/zig-x86_64-linux-$zig_version.tar.xz" "$zig_archive"
+    fi
+    if ! tar -tf "$zig_archive" >/dev/null 2>&1; then
+      echo "Downloaded Zig archive is invalid: $zig_archive" >&2
+      exit 1
     fi
     tar -xf "$zig_archive" -C "$tools"
   fi
