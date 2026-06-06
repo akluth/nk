@@ -525,7 +525,20 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
         }
         24 => {
             services::gui::reset_console();
-            frame.rax = if scheduler::restart_user_task("cat") { 0 } else { 1 };
+            frame.rax = if scheduler::restart_user_task(frame.rdi as usize) {
+                0
+            } else {
+                1
+            };
+            return;
+        }
+        25 => {
+            scheduler::set_focus(frame.rdi as usize);
+            frame.rax = 0;
+            return;
+        }
+        26 => {
+            frame.rax = scheduler::focus() as u64;
             return;
         }
         32 => unsafe {
@@ -546,13 +559,7 @@ fn packed_task_info(index: usize) -> u64 {
     let Some(info) = scheduler::user_task_info(index) else {
         return 0;
     };
-    let name_id = match info.name {
-        "gui" => 1,
-        "shell" => 2,
-        "taskviewer" => 3,
-        "cat" => 4,
-        _ => 0,
-    };
+    let name_id = index as u64 + 1;
     let mut flags = 0u64;
     if info.active {
         flags |= 1;

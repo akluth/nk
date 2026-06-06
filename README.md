@@ -25,6 +25,9 @@ FAT32 application disk.
 - Starts a fourth userland C `cat` ELF based on the original V7 UNIX `cat.c`
   program body and prints a FAT32 file through a small Linux-like syscall
   compatibility layer.
+- Uses a generated monospace bitmap font for GUI text.
+- Tracks a generic focused user-task slot so userland can build taskbar/window
+  switching without making the kernel depend on specific GUI programs.
 - Delivers PS/2 keyboard input through IRQ1 and a small `read_key` syscall.
 - Delivers PS/2 mouse input through IRQ12 and a small `read_mouse` syscall.
 - Supports the shell commands `version`, `cat`, and `shutdown`.
@@ -49,7 +52,9 @@ FAT32 application disk.
 - `src/services.rs`: kernel-side framebuffer service used by GUI syscalls.
 - `src/mouse.rs`: tiny PS/2 mouse packet decoder.
 - `src/linux_abi.rs`: first Linux-like syscall compatibility path for the C
-  `cat` process.
+  `cat` process, including basic file I/O, `openat`, `fstat`, `lseek`, `brk`,
+  `uname`, and exit syscalls.
+- `src/font.rs`: generated fixed-size monospace bitmap font.
 - `src/framebuffer.rs`: low-level pixel and rectangle drawing.
 - `src/limine.rs`: Limine framebuffer, HHDM, and kernel address requests.
 - `src/pci.rs` and `src/virtio.rs`: PCI scan, Virtio capability discovery, and
@@ -154,8 +159,12 @@ $disk = "$PWD\build\virtio-test.img"
 
 - Add a compositor/window manager so GUI and shell windows no longer draw
   directly into the shared framebuffer.
-- Replace the interim scaled bitmap font with a loaded PSF or TrueType-derived
-  bitmap font.
+- Replace the temporary Rust mini-shell with a real port of GNU Bash once the
+  POSIX process model is ready.
+- Add `fork`, `execve`, `waitpid`, pipes, signals, termios/TTY handling, and
+  argv/envp/auxv setup for Bash and other real Linux/POSIX programs.
+- Load a real PSF/SSFN font from the app disk instead of compiling the generated
+  bitmap table into the kernel.
 - Add dirty-rectangle or double-buffered drawing to remove the remaining direct
   framebuffer redraw artifacts.
 - Replace the fixed user image buffer with per-process page allocation.

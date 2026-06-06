@@ -86,10 +86,10 @@ struct UserScheduler {
     tasks: [UserTask; USER_TASKS],
     current: usize,
     installed: usize,
+    focus: usize,
 }
 
 pub struct UserTaskSnapshot {
-    pub name: &'static str,
     pub ticks: u64,
     pub active: bool,
     pub current: bool,
@@ -101,6 +101,7 @@ impl UserScheduler {
             tasks: [UserTask::empty(); USER_TASKS],
             current: 0,
             installed: 0,
+            focus: 1,
         }
     }
 
@@ -156,7 +157,6 @@ impl UserScheduler {
 
         let task = self.tasks[index];
         Some(UserTaskSnapshot {
-            name: task.name,
             ticks: task.ticks,
             active: task.active,
             current: index == self.current,
@@ -181,6 +181,7 @@ impl UserScheduler {
         for _ in 0..self.installed {
             if self.tasks[next].active {
                 self.current = next;
+                self.focus = next;
                 *frame = self.tasks[self.current].frame;
                 return true;
             }
@@ -197,15 +198,25 @@ impl UserScheduler {
         self.tasks[index].active = active;
     }
 
-    fn restart_by_name(&mut self, name: &'static str) -> bool {
-        for index in 0..self.installed {
-            if self.tasks[index].name == name {
-                self.tasks[index].frame = self.tasks[index].initial_frame;
-                self.tasks[index].active = true;
-                return true;
-            }
+    fn restart(&mut self, index: usize) -> bool {
+        if index < self.installed {
+            self.tasks[index].frame = self.tasks[index].initial_frame;
+            self.tasks[index].active = true;
+            self.focus = index;
+            true
+        } else {
+            false
         }
-        false
+    }
+
+    fn set_focus(&mut self, index: usize) {
+        if index < self.installed {
+            self.focus = index;
+        }
+    }
+
+    fn focus(&self) -> usize {
+        self.focus
     }
 }
 
@@ -303,6 +314,16 @@ pub fn exit_current_user(frame: &mut TrapFrame) -> bool {
     unsafe { (*USER_SCHEDULER.0.get()).exit_current(frame) }
 }
 
-pub fn restart_user_task(name: &'static str) -> bool {
-    unsafe { (*USER_SCHEDULER.0.get()).restart_by_name(name) }
+pub fn restart_user_task(index: usize) -> bool {
+    unsafe { (*USER_SCHEDULER.0.get()).restart(index) }
+}
+
+pub fn set_focus(index: usize) {
+    unsafe {
+        (*USER_SCHEDULER.0.get()).set_focus(index);
+    }
+}
+
+pub fn focus() -> usize {
+    unsafe { (*USER_SCHEDULER.0.get()).focus() }
 }

@@ -8,6 +8,7 @@ const SYS_GUI_RECT: u64 = 17;
 const SYS_GUI_TEXT_COLOR: u64 = 21;
 const SYS_TASK_COUNT: u64 = 22;
 const SYS_TASK_INFO: u64 = 23;
+const SYS_FOCUS: u64 = 26;
 
 const SHADOW: u32 = 0x000d1117;
 const WINDOW: u32 = 0x00f3f5f7;
@@ -19,8 +20,13 @@ const ACCENT: u32 = 0x0000b894;
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    draw();
+    let mut was_focused = false;
     loop {
+        let focused = syscall0(SYS_FOCUS) == 2;
+        if focused && !was_focused {
+            draw();
+        }
+        was_focused = focused;
         syscall0(SYS_YIELD);
     }
 }

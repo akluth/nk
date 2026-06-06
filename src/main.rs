@@ -4,6 +4,7 @@
 mod arch;
 mod ata;
 mod fat32;
+mod font;
 mod framebuffer;
 mod gdt;
 mod ipc;
