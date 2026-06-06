@@ -14,6 +14,23 @@ pub type VirtAddr = u64;
 pub type PhysAddr = u64;
 
 #[derive(Clone, Copy)]
+struct LoadSegment {
+    file_offset: usize,
+    virt: u64,
+    file_size: usize,
+}
+
+impl LoadSegment {
+    const fn empty() -> Self {
+        Self {
+            file_offset: 0,
+            virt: 0,
+            file_size: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub enum Syscall {
     Yield = 0,
 }
@@ -197,7 +214,7 @@ pub fn install_first_task() {
         serial::write_line("nk: bash elf missing; no terminal process installed");
     }
     install_user_elf(2, "taskviewer", UserAbi::Native, b"TASKVIEWELF");
-    serial::write_line("nk: cat elf available on fat32 for on-demand exec");
+    serial::write_line("nk: coreutils elfs available on fat32 for on-demand exec");
 }
 
 pub fn task_pml4(index: usize) -> Option<u64> {
@@ -432,14 +449,23 @@ fn load_elf(task_index: usize, image: &[u8]) -> Option<u64> {
     if image.len() < 64 || &image[0..4] != b"\x7fELF" {
         return None;
     }
-    if image[4] != 2 || image[5] != 1 || read_u16(image, 16)? != 2 {
+    if image[4] != 2 || image[5] != 1 {
+        return None;
+    }
+    let elf_type = read_u16(image, 16)?;
+    if elf_type != 2 && elf_type != 3 {
         return None;
     }
     if read_u16(image, 18)? != 0x3e {
         return None;
     }
 
-    let entry = read_u64(image, 24)?;
+    let load_bias = if elf_type == 3 {
+        memory::USER_IMAGE_BASE
+    } else {
+        0
+    };
+    let entry = read_u64(image, 24)?.checked_add(load_bias)?;
     let phoff = read_u64(image, 32)? as usize;
     let phentsize = read_u16(image, 54)? as usize;
     let phnum = read_u16(image, 56)? as usize;
@@ -447,29 +473,157 @@ fn load_elf(task_index: usize, image: &[u8]) -> Option<u64> {
         return None;
     }
 
+    let mut loads = [LoadSegment::empty(); 8];
+    let mut load_count = 0usize;
+    let mut dynamic_offset = 0usize;
+    let mut dynamic_size = 0usize;
     for index in 0..phnum {
         let offset = phoff.checked_add(index.checked_mul(phentsize)?)?;
         if offset.checked_add(phentsize)? > image.len() {
             return None;
         }
-        if read_u32(image, offset)? != 1 {
-            continue;
-        }
+        let ph_type = read_u32(image, offset)?;
 
         let file_offset = read_u64(image, offset + 8)? as usize;
-        let virt = read_u64(image, offset + 16)?;
+        let raw_virt = read_u64(image, offset + 16)?;
         let file_size = read_u64(image, offset + 32)? as usize;
         let mem_size = read_u64(image, offset + 40)? as usize;
         let file_end = file_offset.checked_add(file_size)?;
         if file_end > image.len() {
             return None;
         }
-        if !memory::copy_user_segment(task_index, virt, &image[file_offset..file_end], mem_size) {
-            return None;
+
+        if ph_type == 1 {
+            if load_count >= loads.len() {
+                return None;
+            }
+            loads[load_count] = LoadSegment {
+                file_offset,
+                virt: raw_virt,
+                file_size,
+            };
+            load_count += 1;
+
+            let virt = raw_virt.checked_add(load_bias)?;
+            if !memory::copy_user_segment(
+                task_index,
+                virt,
+                &image[file_offset..file_end],
+                mem_size,
+            ) {
+                return None;
+            }
+        } else if ph_type == 2 {
+            dynamic_offset = file_offset;
+            dynamic_size = file_size;
         }
     }
 
+    if elf_type == 3
+        && !apply_relative_relocations(
+            task_index,
+            image,
+            load_bias,
+            &loads[..load_count],
+            dynamic_offset,
+            dynamic_size,
+        )
+    {
+        return None;
+    }
+
     Some(entry)
+}
+
+fn apply_relative_relocations(
+    task_index: usize,
+    image: &[u8],
+    load_bias: u64,
+    loads: &[LoadSegment],
+    dynamic_offset: usize,
+    dynamic_size: usize,
+) -> bool {
+    const DT_NULL: u64 = 0;
+    const DT_RELA: u64 = 7;
+    const DT_RELASZ: u64 = 8;
+    const DT_RELAENT: u64 = 9;
+    const R_X86_64_RELATIVE: u64 = 8;
+
+    if dynamic_size == 0 {
+        return true;
+    }
+
+    let mut rela_addr = 0u64;
+    let mut rela_size = 0usize;
+    let mut rela_ent = 24usize;
+    let mut offset = dynamic_offset;
+    let dynamic_end = dynamic_offset.saturating_add(dynamic_size);
+    while offset + 16 <= image.len() && offset < dynamic_end {
+        let tag = match read_u64(image, offset) {
+            Some(value) => value,
+            None => return false,
+        };
+        let value = match read_u64(image, offset + 8) {
+            Some(value) => value,
+            None => return false,
+        };
+        if tag == DT_NULL {
+            break;
+        } else if tag == DT_RELA {
+            rela_addr = value;
+        } else if tag == DT_RELASZ {
+            rela_size = value as usize;
+        } else if tag == DT_RELAENT {
+            rela_ent = value as usize;
+        }
+        offset += 16;
+    }
+
+    if rela_addr == 0 || rela_size == 0 || rela_ent < 24 {
+        return true;
+    }
+    let Some(rela_file_offset) = virt_to_file_offset(loads, rela_addr) else {
+        return false;
+    };
+
+    let count = rela_size / rela_ent;
+    for index in 0..count {
+        let offset = rela_file_offset + index * rela_ent;
+        let Some(reloc_offset) = read_u64(image, offset) else {
+            return false;
+        };
+        let Some(info) = read_u64(image, offset + 8) else {
+            return false;
+        };
+        let Some(addend) = read_i64(image, offset + 16) else {
+            return false;
+        };
+        if info & 0xffff_ffff != R_X86_64_RELATIVE {
+            return false;
+        }
+
+        let target = match reloc_offset.checked_add(load_bias) {
+            Some(value) => value,
+            None => return false,
+        };
+        let value = (load_bias as i64).wrapping_add(addend) as u64;
+        if !memory::copy_user_segment(task_index, target, &value.to_le_bytes(), 8) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn virt_to_file_offset(loads: &[LoadSegment], virt: u64) -> Option<usize> {
+    for load in loads {
+        let start = load.virt;
+        let end = load.virt.checked_add(load.file_size as u64)?;
+        if virt >= start && virt < end {
+            return Some(load.file_offset + (virt - start) as usize);
+        }
+    }
+    None
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
@@ -485,6 +639,13 @@ fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
 fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     let data = bytes.get(offset..offset + 8)?;
     Some(u64::from_le_bytes([
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+    ]))
+}
+
+fn read_i64(bytes: &[u8], offset: usize) -> Option<i64> {
+    let data = bytes.get(offset..offset + 8)?;
+    Some(i64::from_le_bytes([
         data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]))
 }

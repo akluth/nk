@@ -4,14 +4,16 @@ use crate::{limine::KernelAddress, scheduler::USER_TASKS, serial};
 
 const PAGE_SIZE: u64 = 4096;
 const PAGE_ENTRIES: usize = 512;
-const TABLES_PER_TASK: usize = 24;
+const USER_IMAGE_PT_COUNT: usize = (USER_IMAGE_PAGES + PAGE_ENTRIES - 1) / PAGE_ENTRIES;
+const USER_STACK_PT_COUNT: usize = 1;
+const TABLES_PER_TASK: usize = 96;
 const TABLE_COUNT: usize = TABLES_PER_TASK * USER_TASKS;
-const KERNEL_MAPPED_PAGES: usize = 4096;
+const KERNEL_MAPPED_PAGES: usize = 32768;
 const KERNEL_PT_COUNT: usize = (KERNEL_MAPPED_PAGES + PAGE_ENTRIES - 1) / PAGE_ENTRIES + 1;
 pub const USER_IMAGE_BASE: u64 = 0x0000_0000_4000_0000;
-pub const USER_IMAGE_SIZE: usize = 1536 * 1024;
+pub const USER_IMAGE_SIZE: usize = 18 * 1024 * 1024;
 pub const USER_IMAGE_PAGES: usize = USER_IMAGE_SIZE / PAGE_SIZE as usize;
-pub const USER_STACK_BASE: u64 = 0x0000_0000_4018_0000;
+pub const USER_STACK_BASE: u64 = 0x0000_0000_4120_0000;
 pub const USER_STACK_SIZE: usize = 16 * 1024;
 const USER_STACK_PAGES: usize = USER_STACK_SIZE / PAGE_SIZE as usize;
 
@@ -150,27 +152,32 @@ fn create_user_address_space(
         let pml4 = table_base;
         let pdpt = table_base + 1;
         let user_pd = table_base + 2;
-        let user_pt = table_base + 3;
-        let kernel_pdpt = table_base + 4;
-        let kernel_pd = table_base + 5;
-        let kernel_pts = table_base + 6;
-        let framebuffer_pdpt = table_base + 15;
-        let framebuffer_pd = table_base + 16;
-        let framebuffer_pts = table_base + 17;
+        let user_pts = table_base + 3;
+        let stack_pt = user_pts + USER_IMAGE_PT_COUNT;
+        let kernel_pdpt = stack_pt + USER_STACK_PT_COUNT;
+        let kernel_pd = kernel_pdpt + 1;
+        let kernel_pts = kernel_pd + 1;
+        let framebuffer_pdpt = kernel_pts + KERNEL_PT_COUNT;
+        let framebuffer_pd = framebuffer_pdpt + 1;
+        let framebuffer_pts = framebuffer_pd + 1;
 
         link_table(tables, kernel, pml4, 0, pdpt, PTE_USER);
         link_table(tables, kernel, pdpt, 1, user_pd, PTE_USER);
-        link_table(tables, kernel, user_pd, 0, user_pt, PTE_USER);
+        for table in 0..USER_IMAGE_PT_COUNT {
+            link_table(tables, kernel, user_pd, table, user_pts + table, PTE_USER);
+        }
 
         let user_image_phys = virt_to_phys(
             core::ptr::addr_of!(USER_IMAGES.images[task_index]) as u64,
             kernel,
         );
         for page in 0..USER_IMAGE_PAGES {
+            let table = user_pts + page / PAGE_ENTRIES;
+            let entry = page % PAGE_ENTRIES;
             map_page(
                 tables,
-                user_pt,
-                page,
+                table,
+                entry,
                 user_image_phys + (page as u64 * PAGE_SIZE),
                 PTE_USER,
             );
@@ -181,11 +188,19 @@ fn create_user_address_space(
             kernel,
         );
         let stack_page_base = ((USER_STACK_BASE - USER_IMAGE_BASE) / PAGE_SIZE) as usize;
+        link_table(
+            tables,
+            kernel,
+            user_pd,
+            stack_page_base / PAGE_ENTRIES,
+            stack_pt,
+            PTE_USER,
+        );
         for page in 0..USER_STACK_PAGES {
             map_page(
                 tables,
-                user_pt,
-                stack_page_base + page,
+                stack_pt,
+                (stack_page_base + page) % PAGE_ENTRIES,
                 user_stack_phys + (page as u64 * PAGE_SIZE),
                 PTE_USER | PTE_NO_EXECUTE,
             );

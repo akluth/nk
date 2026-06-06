@@ -11,12 +11,25 @@ TOTAL_SECTORS = 131072
 ROOT_CLUSTER = 2
 
 
-def short_name(path: Path) -> bytes:
+def short_name(name: str) -> bytes:
+    path = Path(name)
     stem = path.stem.upper().encode("ascii")
     suffix = path.suffix[1:].upper().encode("ascii")
     if len(stem) > 8 or len(suffix) > 3:
-        raise ValueError(f"{path.name} does not fit 8.3")
+        raise ValueError(f"{name} does not fit 8.3")
     return stem.ljust(8, b" ") + suffix.ljust(3, b" ")
+
+
+def parse_file_specs(args: list[str]) -> list[tuple[Path, str]]:
+    specs = []
+    for arg in args:
+        if "=" in arg:
+            source, alias = arg.split("=", 1)
+            specs.append((Path(source), alias))
+        else:
+            path = Path(arg)
+            specs.append((path, path.name))
+    return specs
 
 
 def main() -> int:
@@ -25,7 +38,7 @@ def main() -> int:
         return 2
 
     out = Path(sys.argv[1])
-    files = [Path(arg) for arg in sys.argv[2:]]
+    files = parse_file_specs(sys.argv[2:])
     clusters = (TOTAL_SECTORS - RESERVED_SECTORS) // SECTORS_PER_CLUSTER
     fat_sectors = math.ceil((clusters + 2) * 4 / SECTOR_SIZE)
     data_start = RESERVED_SECTORS + FAT_COUNT * fat_sectors
@@ -72,20 +85,27 @@ def main() -> int:
 
     root_entries = []
     next_cluster = ROOT_CLUSTER + 1
-    for file in files:
-        data = file.read_bytes()
-        needed = max(1, math.ceil(len(data) / (SECTOR_SIZE * SECTORS_PER_CLUSTER)))
-        first_cluster = next_cluster
-        for i in range(needed):
-            cluster = next_cluster + i
-            fat_entries[cluster] = 0x0FFFFFFF if i == needed - 1 else cluster + 1
-            start_sector = data_start + (cluster - 2) * SECTORS_PER_CLUSTER
-            start = start_sector * SECTOR_SIZE
-            chunk_start = i * SECTORS_PER_CLUSTER * SECTOR_SIZE
-            chunk = data[chunk_start:chunk_start + SECTORS_PER_CLUSTER * SECTOR_SIZE]
-            image[start:start + len(chunk)] = chunk
-        next_cluster += needed
-        root_entries.append((short_name(file), first_cluster, len(data)))
+    allocated = {}
+    for file, alias in files:
+        key = file.resolve()
+        if key in allocated:
+            first_cluster, size = allocated[key]
+        else:
+            data = file.read_bytes()
+            needed = max(1, math.ceil(len(data) / (SECTOR_SIZE * SECTORS_PER_CLUSTER)))
+            first_cluster = next_cluster
+            for i in range(needed):
+                cluster = next_cluster + i
+                fat_entries[cluster] = 0x0FFFFFFF if i == needed - 1 else cluster + 1
+                start_sector = data_start + (cluster - 2) * SECTORS_PER_CLUSTER
+                start = start_sector * SECTOR_SIZE
+                chunk_start = i * SECTORS_PER_CLUSTER * SECTOR_SIZE
+                chunk = data[chunk_start:chunk_start + SECTORS_PER_CLUSTER * SECTOR_SIZE]
+                image[start:start + len(chunk)] = chunk
+            next_cluster += needed
+            size = len(data)
+            allocated[key] = (first_cluster, size)
+        root_entries.append((short_name(alias), first_cluster, size))
 
     for index, (name, first_cluster, size) in enumerate(root_entries):
         entry = bytearray(32)

@@ -1,6 +1,6 @@
 use crate::{ata, serial};
 
-const MAX_FILE_SIZE: usize = 1024 * 1024;
+const MAX_FILE_SIZE: usize = 20 * 1024 * 1024;
 const END_OF_CHAIN: u32 = 0x0fff_fff8;
 
 static mut FILE_BUFFER: [u8; MAX_FILE_SIZE] = [0; MAX_FILE_SIZE];

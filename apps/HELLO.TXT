@@ -1,3 +1,3 @@
 hello from nk fat32.
-printed by the original v7 unix
-cat program body as ring 3.
+printed by uutils coreutils
+running as a ring 3 process.

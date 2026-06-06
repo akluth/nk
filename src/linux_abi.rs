@@ -9,6 +9,7 @@ const SYS_CLOSE: u64 = 3;
 const SYS_STAT: u64 = 4;
 const SYS_FSTAT: u64 = 5;
 const SYS_MMAP: u64 = 9;
+const SYS_MPROTECT: u64 = 10;
 const SYS_MUNMAP: u64 = 11;
 const SYS_LSEEK: u64 = 8;
 const SYS_RT_SIGACTION: u64 = 13;
@@ -61,10 +62,10 @@ const EAGAIN: i64 = -11;
 
 const CHILD_SLOT: usize = 3;
 const CHILD_PID: u64 = (CHILD_SLOT + 1) as u64;
-const USER_MMAP_START: u64 = 0x0000_0000_4010_0000;
-const USER_MMAP_END: u64 = 0x0000_0000_4017_0000;
-const USER_BRK_START: u64 = 0x0000_0000_4017_0000;
-const USER_BRK_END: u64 = 0x0000_0000_4017_f000;
+const USER_MMAP_START: u64 = 0x0000_0000_4110_0000;
+const USER_MMAP_END: u64 = 0x0000_0000_411f_0000;
+const USER_BRK_START: u64 = 0x0000_0000_411f_0000;
+const USER_BRK_END: u64 = 0x0000_0000_411f_f000;
 
 struct OpenFile {
     data: Option<&'static [u8]>,
@@ -131,6 +132,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_MUNMAP => {
+            frame.rax = 0;
+            true
+        }
+        SYS_MPROTECT => {
             frame.rax = 0;
             true
         }
@@ -823,6 +828,25 @@ fn path_to_fat_name(path: *const u8) -> Option<[u8; 11]> {
     }
 
     let name = &raw[start..len];
+    if name == b"coreutils" {
+        return Some(*b"COREUTILELF");
+    }
+    if name == b"dircolors" {
+        return Some(*b"DIRCLRS ELF");
+    }
+    if name == b"sha224sum" {
+        return Some(*b"SHA224  ELF");
+    }
+    if name == b"sha256sum" {
+        return Some(*b"SHA256  ELF");
+    }
+    if name == b"sha384sum" {
+        return Some(*b"SHA384  ELF");
+    }
+    if name == b"sha512sum" {
+        return Some(*b"SHA512  ELF");
+    }
+
     let mut out = [b' '; 11];
     let mut pos = 0usize;
     let mut ext = 8usize;

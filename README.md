@@ -13,7 +13,7 @@ FAT32 application disk.
 - Starts Ring 3 tasks through `iretq` and saved trapframes.
 - Uses timer interrupt trapframes as scheduler context.
 - Builds a FAT32 application disk containing `GUI.ELF`, `BASH.ELF`,
-  `TASKVIEW.ELF`, `CAT.ELF`, plus small data files.
+  `TASKVIEW.ELF`, uutils Coreutils command aliases, plus small data files.
 - Reads that FAT32 disk through a first ATA PIO block-device path.
 - Parses userland ELF files from the FAT32 application disk and starts them as
   Ring 3 tasks.
@@ -25,9 +25,8 @@ FAT32 application disk.
   process.
 - Starts a third userland task viewer ELF; the GUI compositor renders its
   window from task metadata.
-- Starts a fourth userland C `cat` ELF based on the original V7 UNIX `cat.c`
-  program body and prints a FAT32 file through a small Linux-like syscall
-  compatibility layer.
+- Makes the Rust uutils Coreutils multicall binary available through FAT32
+  aliases such as `CAT.ELF`, `LS.ELF`, `WC.ELF`, and `SHA256SUM.ELF`.
 - Selects Linux/POSIX syscall handling by task ABI, so future Linux-compatible
   user programs are not tied to hard-coded kernel task names.
 - Includes a GNU Bash port under `ports/bash`; the port fetches upstream Bash
@@ -38,7 +37,7 @@ FAT32 application disk.
   switching without making the kernel depend on specific GUI programs.
 - Delivers PS/2 keyboard input through IRQ1 and a small `read_key` syscall.
 - Delivers PS/2 mouse input through IRQ12 and a small `read_mouse` syscall.
-- Bash can start the separate `CAT.ELF` user task on demand through the minimal
+- Bash can start Coreutils commands on demand through the minimal
   `fork`/`execve`/`wait4` path; `cat hello.txt` reads `HELLO.TXT` from the
   FAT32 application disk.
 
@@ -73,10 +72,9 @@ FAT32 application disk.
 - `user/gui/linker.ld`: GUI ELF linker script.
 - `user/taskview/src/main.rs`: separate no_std Rust task viewer executable.
 - `user/taskview/linker.ld`: task viewer ELF linker script.
-- `user/cat/src/cat.c`: separate C `cat` executable using the V7 UNIX `cat.c`
-  program body with a tiny local runtime.
-- `user/cat/linker.ld`: cat ELF linker script.
 - `ports/bash/`: staging notes and fetch script for the real GNU Bash port.
+- `ports/coreutils/`: fetch/build glue for the Rust uutils Coreutils port and
+  the command alias list installed into the FAT32 app disk.
 
 ## Install Tools
 
@@ -114,7 +112,7 @@ The build script creates both:
 - `target/x86_64-unknown-none/release/nk`: the kernel.
 - `build/user/gui.elf`: the separate userland GUI executable.
 - `build/user/taskview.elf`: the separate userland task viewer executable.
-- `build/user/cat.elf`: the separate userland C cat executable.
+- `build/user/coreutils.elf`: the Rust uutils Coreutils multicall executable.
 - `build/user/bash.elf`: GNU Bash executable; the normal build fetches/builds
   it on demand, copies it to the app disk as `BASH.ELF`, and starts it as the
   standard terminal process.
@@ -123,11 +121,12 @@ The build script creates both:
 The ISO only contains the kernel and bootloader files. User programs are loaded
 from the FAT32 application disk at runtime.
 
-Building `cat.elf` requires `clang` and `rust-lld` because it is a C userland
-program rather than a Rust executable. Building Bash requires network access on
-the first build, MSYS2 `make`, MSYS2 `gcc` for host build tools, and portable
-Zig for the static Musl target; the build script downloads Zig and Bash sources
-into ignored `third_party` storage when needed. See `ports/bash/PORT.md`.
+Building Coreutils requires network access on the first build to download the
+official uutils `x86_64-unknown-linux-musl` release asset into ignored
+`third_party` storage. Building Bash requires network access on the first
+build, MSYS2 `make`, MSYS2 `gcc` for host build tools, and portable Zig for the
+static Musl target; the build script downloads Zig and Bash sources into
+ignored `third_party` storage when needed. See `ports/bash/PORT.md`.
 
 ## Run in QEMU
 

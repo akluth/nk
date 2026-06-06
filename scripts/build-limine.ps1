@@ -60,52 +60,6 @@ function Build-UserProgram {
     }
 }
 
-function Build-CUserProgram {
-    param(
-        [Parameter(Mandatory = $true)] [string] $Name
-    )
-
-    $Out = Join-Path $Build "user\$Name.elf"
-    $Obj = Join-Path $Build "user\$Name.o"
-    New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
-    $Clang = Get-Command clang -ErrorAction SilentlyContinue
-    if (-not $Clang -and (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) {
-        $Clang = @{ Source = "C:\Program Files\LLVM\bin\clang.exe" }
-    }
-    if (-not $Clang) {
-        throw "clang wurde nicht gefunden. Installiere LLVM, um user/$Name zu bauen."
-    }
-    $RustLld = Get-Command rust-lld -ErrorAction SilentlyContinue
-    if (-not $RustLld) {
-        $RustLld = Get-ChildItem "$env:USERPROFILE\.rustup\toolchains" -Recurse -Filter rust-lld.exe -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-    }
-    if (-not $RustLld) {
-        throw "rust-lld wurde nicht gefunden."
-    }
-    $RustLldPath = if ($RustLld.Source) { $RustLld.Source } else { $RustLld.FullName }
-    Invoke-Checked $Clang.Source `
-        "--target=x86_64-unknown-none" `
-        "-std=gnu89" `
-        "-ffreestanding" `
-        "-fno-builtin" `
-        "-fno-stack-protector" `
-        "-mno-red-zone" `
-        "-nostdlib" `
-        "-c" `
-        (Join-Path $Root "user\$Name\src\$Name.c") `
-        "-o" `
-        $Obj
-    Invoke-Checked $RustLldPath `
-        "-flavor" `
-        "gnu" `
-        "-T" `
-        (Join-Path $Root "user\$Name\linker.ld") `
-        "-o" `
-        $Out `
-        $Obj
-}
-
 function Ensure-BashProgram {
     $BashPortElf = Join-Path $Root "third_party\bash-5.3\bash"
     $BashOut = Join-Path $Build "user\bash.elf"
@@ -117,6 +71,34 @@ function Ensure-BashProgram {
         throw "Bash wurde nicht gebaut. Erwartet: $BashPortElf"
     }
     Copy-Item $BashPortElf $BashOut
+}
+
+function Ensure-Coreutils {
+    $CoreutilsOut = Join-Path $Build "user\coreutils.elf"
+    $CoreutilsSource = Join-Path $Root "third_party\coreutils-0.9.0-x86_64-unknown-linux-musl"
+    if (-not (Test-Path $CoreutilsSource)) {
+        Invoke-Checked -FilePath powershell -Arguments @("-ExecutionPolicy", "Bypass", "-File", (Join-Path $Root "ports\coreutils\fetch-coreutils.ps1"))
+    }
+    Invoke-Checked -FilePath powershell -Arguments @("-ExecutionPolicy", "Bypass", "-File", (Join-Path $Root "ports\coreutils\build-coreutils.ps1"))
+    if (-not (Test-Path $CoreutilsOut)) {
+        throw "Coreutils wurde nicht gebaut. Erwartet: $CoreutilsOut"
+    }
+}
+
+function Coreutils-AppFiles {
+    $CoreutilsOut = Join-Path $Build "user\coreutils.elf"
+    $List = Join-Path $Root "ports\coreutils\coreutils-apps.txt"
+    $Entries = @()
+    foreach ($Line in Get-Content $List) {
+        $Trimmed = $Line.Trim()
+        if (-not $Trimmed -or $Trimmed.StartsWith("#")) {
+            continue
+        }
+        $Parts = $Trimmed -split "\s+", 2
+        $Alias = if ($Parts.Count -eq 2) { $Parts[1] } else { "$($Parts[0]).ELF" }
+        $Entries += "$CoreutilsOut=$Alias"
+    }
+    return $Entries
 }
 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
@@ -148,14 +130,14 @@ New-Item -ItemType Directory -Force -Path (Join-Path $IsoRoot "boot") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $IsoRoot "EFI\BOOT") | Out-Null
 Build-UserProgram "gui"
 Build-UserProgram "taskview"
-Build-CUserProgram "cat"
+Ensure-Coreutils
 Ensure-BashProgram
 
 $AppFiles = @(
     (Join-Path $Build "user\gui.elf"),
-    (Join-Path $Build "user\taskview.elf"),
-    (Join-Path $Build "user\cat.elf")
+    (Join-Path $Build "user\taskview.elf")
 )
+$AppFiles += Coreutils-AppFiles
 $BashElf = Join-Path $Build "user\bash.elf"
 $AppFiles += $BashElf
 $AppFiles += (Join-Path $Root "apps\HELLO.TXT")

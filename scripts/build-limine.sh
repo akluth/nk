@@ -81,23 +81,50 @@ build_user_program() {
     "$ROOT/user/$name/src/main.rs"
 }
 
-build_c_user_program() {
-  local name="$1"
-  clang \
-    --target=x86_64-unknown-none \
-    -std=gnu89 \
-    -ffreestanding \
-    -fno-builtin \
-    -fno-stack-protector \
-    -mno-red-zone \
-    -nostdlib \
-    -c "$ROOT/user/$name/src/$name.c" \
-    -o "$BUILD/user/$name.o"
-  "$RUST_LLD" \
-    -flavor gnu \
-    -T "$ROOT/user/$name/linker.ld" \
-    -o "$BUILD/user/$name.elf" \
-    "$BUILD/user/$name.o"
+ensure_coreutils() {
+  download_file() {
+    local url="$1"
+    local out="$2"
+    local tmp="$out.download"
+    rm -f "$tmp"
+    curl -fL "$url" -o "$tmp"
+    test -s "$tmp"
+    mv -f "$tmp" "$out"
+  }
+
+  local version="0.9.0"
+  local name="coreutils-$version-x86_64-unknown-linux-musl"
+  local archive="$ROOT/third_party/$name.tar.gz"
+  local source="$ROOT/third_party/$name"
+  local url="https://github.com/uutils/coreutils/releases/download/$version/$name.tar.gz"
+
+  mkdir -p "$ROOT/third_party" "$BUILD/user"
+  if [ ! -f "$archive" ] || ! tar -tzf "$archive" >/dev/null 2>&1; then
+    rm -f "$archive"
+    download_file "$url" "$archive"
+  fi
+  if ! tar -tzf "$archive" >/dev/null 2>&1; then
+    echo "Downloaded coreutils archive is invalid: $archive" >&2
+    exit 1
+  fi
+  if [ ! -d "$source" ]; then
+    rm -rf "$source"
+    tar -xzf "$archive" -C "$ROOT/third_party"
+  fi
+
+  local binary=""
+  if [ -f "$source/coreutils" ]; then
+    binary="$source/coreutils"
+  elif [ -f "$source/cat" ]; then
+    binary="$source/cat"
+  else
+    binary="$(find "$source" -type f \( -name coreutils -o -name cat \) | head -1)"
+  fi
+  if [ -z "$binary" ]; then
+    echo "No coreutils or cat binary found in $source" >&2
+    exit 1
+  fi
+  cp "$binary" "$BUILD/user/coreutils.elf"
 }
 
 ensure_bash_program() {
@@ -180,15 +207,23 @@ ensure_bash_program() {
 
 build_user_program gui
 build_user_program taskview
-build_c_user_program cat
+ensure_coreutils
 ensure_bash_program
 
 app_files=(
   "$BUILD/user/gui.elf"
   "$BUILD/user/taskview.elf"
-  "$BUILD/user/cat.elf"
   "$BUILD/user/bash.elf"
 )
+while read -r app alias; do
+  if [ -z "${app:-}" ] || [[ "$app" = \#* ]]; then
+    continue
+  fi
+  if [ -z "${alias:-}" ]; then
+    alias="$app.ELF"
+  fi
+  app_files+=("$BUILD/user/coreutils.elf=$alias")
+done < "$ROOT/ports/coreutils/coreutils-apps.txt"
 app_files+=("$ROOT/apps/HELLO.TXT")
 python3 "$ROOT/scripts/make-fat32.py" "$BUILD/nk-apps.fat32" "${app_files[@]}"
 
