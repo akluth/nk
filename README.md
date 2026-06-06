@@ -19,12 +19,11 @@ FAT32 application disk.
   Ring 3 tasks.
 - Provides minimal GUI syscalls for clearing the screen, drawing rectangles,
   and drawing scaled bitmap text.
-- Starts a userland GUI ELF that owns the compositor, paints the desktop, and
-  shows Bash in the default terminal window.
-- Boots a real static GNU Bash 5.3 `BASH.ELF` as the standard second user
-  process.
-- Starts a third userland task viewer ELF; the GUI compositor renders its
-  window from task metadata.
+- Boots a real static GNU Bash 5.3 `BASH.ELF` as the default user process and
+  renders its terminal output directly through a minimal kernel framebuffer
+  console.
+- Keeps the userland GUI compositor and task viewer as optional FAT32-loaded
+  programs; they are not started automatically during boot.
 - Makes the Rust uutils Coreutils multicall binary available through FAT32
   aliases such as `CAT.ELF`, `LS.ELF`, `WC.ELF`, and `SHA256SUM.ELF`.
 - Selects Linux/POSIX syscall handling by task ABI, so future Linux-compatible
@@ -68,7 +67,8 @@ FAT32 application disk.
 - `src/limine.rs`: Limine framebuffer, HHDM, and kernel address requests.
 - `src/pci.rs` and `src/virtio.rs`: PCI scan, Virtio capability discovery, and
   early queue memory setup.
-- `user/gui/src/main.rs`: separate no_std Rust GUI/compositor executable.
+- `user/gui/src/main.rs`: optional separate no_std Rust GUI/compositor
+  executable, startable from Bash as `./gui.elf`.
 - `user/gui/linker.ld`: GUI ELF linker script.
 - `user/taskview/src/main.rs`: separate no_std Rust task viewer executable.
 - `user/taskview/linker.ld`: task viewer ELF linker script.
@@ -110,8 +110,8 @@ Linux/WSL:
 The build script creates both:
 
 - `target/x86_64-unknown-none/release/nk`: the kernel.
-- `build/user/gui.elf`: the separate userland GUI executable.
-- `build/user/taskview.elf`: the separate userland task viewer executable.
+- `build/user/gui.elf`: optional separate userland GUI executable.
+- `build/user/taskview.elf`: optional separate userland task viewer executable.
 - `build/user/coreutils.elf`: the Rust uutils Coreutils multicall executable.
 - `build/user/bash.elf`: GNU Bash executable; the normal build fetches/builds
   it on demand, copies it to the app disk as `BASH.ELF`, and starts it as the

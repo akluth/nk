@@ -16,7 +16,7 @@ const SYS_CONSOLE_SEQ: u64 = 33;
 const SYS_CONSOLE_LEN: u64 = 34;
 const SYS_CONSOLE_BYTE: u64 = 35;
 
-const TASK_BASH: u64 = 1;
+const TASK_BASH: u64 = 0;
 const TASK_TASKVIEW: u64 = 2;
 
 const SCREEN_W: u64 = 1280;

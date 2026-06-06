@@ -68,4 +68,12 @@ impl Framebuffer {
     pub fn byte_len(&self) -> u64 {
         (self.pitch * self.height) as u64
     }
+
+    pub const fn width(&self) -> usize {
+        self.width
+    }
+
+    pub const fn height(&self) -> usize {
+        self.height
+    }
 }

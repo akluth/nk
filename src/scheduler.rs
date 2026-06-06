@@ -133,7 +133,7 @@ impl UserScheduler {
             tasks: [UserTask::empty(); USER_TASKS],
             current: 0,
             installed: 0,
-            focus: 1,
+            focus: 0,
         }
     }
 
@@ -368,11 +368,11 @@ impl UserScheduler {
             return Some(self.tasks[parent].pml4_phys);
         }
 
-        if exiting != 1 && self.installed > 1 && self.tasks[1].active {
-            self.current = 1;
-            self.focus = 1;
-            *frame = self.tasks[1].frame;
-            return Some(self.tasks[1].pml4_phys);
+        if exiting != 0 && self.installed > 0 && self.tasks[0].active {
+            self.current = 0;
+            self.focus = 0;
+            *frame = self.tasks[0].frame;
+            return Some(self.tasks[0].pml4_phys);
         }
 
         self.switch_to_next(frame)

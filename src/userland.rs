@@ -209,11 +209,11 @@ pub fn install_page_table_roots(roots: [Option<PageTableRoot>; scheduler::USER_T
 }
 
 pub fn install_first_task() {
-    install_user_elf(0, "gui", UserAbi::Native, b"GUI     ELF");
-    if !install_user_elf(1, "bash", UserAbi::Linux, b"BASH    ELF") {
+    if !install_user_elf(0, "bash", UserAbi::Linux, b"BASH    ELF") {
         serial::write_line("nk: bash elf missing; no terminal process installed");
     }
-    install_user_elf(2, "taskviewer", UserAbi::Native, b"TASKVIEWELF");
+    serial::write_line("nk: gui elf available on fat32 for optional exec");
+    serial::write_line("nk: taskviewer elf available on fat32 for optional exec");
     serial::write_line("nk: coreutils elfs available on fat32 for on-demand exec");
 }
 
@@ -284,6 +284,29 @@ pub fn exec_linux_elf(
 
     let new_frame = new_task_frame(UserAbi::Linux, entry, stack_top);
     scheduler::replace_user_task_frame(index, task_name, UserAbi::Linux, new_frame);
+    *frame = new_frame;
+    true
+}
+
+pub fn exec_native_elf(
+    index: usize,
+    task_name: &'static str,
+    fat_name: &[u8; 11],
+    frame: &mut TrapFrame,
+) -> bool {
+    let Some(image) = crate::fat32::read_file(fat_name) else {
+        return false;
+    };
+    if !memory::clear_user_image(index) {
+        return false;
+    }
+    let Some(entry) = load_elf(index, image) else {
+        return false;
+    };
+
+    let stack_top = memory::user_stack_top(index);
+    let new_frame = new_task_frame(UserAbi::Native, entry, stack_top);
+    scheduler::replace_user_task_frame(index, task_name, UserAbi::Native, new_frame);
     *frame = new_frame;
     true
 }

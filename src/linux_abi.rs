@@ -358,10 +358,27 @@ fn execve(frame: &mut scheduler::TrapFrame, path: *const u8, argv: *const u64) -
         args[arg_index] = &arg_storage[arg_index][..arg_lens[arg_index]];
     }
 
-    if userland::exec_linux_elf(index, "exec", &fat_name, &args[..arg_count], frame) {
+    let native_name = native_exec_name(&fat_name);
+    let exec_ok = if let Some(name) = native_name {
+        userland::exec_native_elf(index, name, &fat_name, frame)
+    } else {
+        userland::exec_linux_elf(index, "exec", &fat_name, &args[..arg_count], frame)
+    };
+
+    if exec_ok {
         0
     } else {
         ENOENT
+    }
+}
+
+fn native_exec_name(fat_name: &[u8; 11]) -> Option<&'static str> {
+    if fat_name == b"GUI     ELF" {
+        Some("gui")
+    } else if fat_name == b"TASKVIEWELF" {
+        Some("taskviewer")
+    } else {
+        None
     }
 }
 
