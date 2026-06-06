@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 
-use crate::{arch, fat32, keyboard, scheduler, serial, services};
+use crate::{arch, fat32, keyboard, memory, scheduler, serial, services, userland};
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
@@ -32,16 +32,20 @@ const SYS_ARCH_PRCTL: u64 = 158;
 const SYS_SET_TID_ADDRESS: u64 = 218;
 const SYS_BRK: u64 = 12;
 const SYS_GETPID: u64 = 39;
+const SYS_FORK: u64 = 57;
+const SYS_EXECVE: u64 = 59;
 const SYS_WAIT4: u64 = 61;
 const SYS_UNAME: u64 = 63;
 const SYS_EXIT: u64 = 60;
 const SYS_CLOCK_GETTIME: u64 = 228;
 const SYS_OPENAT: u64 = 257;
+const SYS_FACCESSAT: u64 = 269;
 const SYS_EXIT_GROUP: u64 = 231;
 const SYS_SET_ROBUST_LIST: u64 = 273;
 const SYS_NEWFSTATAT: u64 = 262;
 const SYS_PRLIMIT64: u64 = 302;
 const SYS_GETRANDOM: u64 = 318;
+const SYS_RSEQ: u64 = 439;
 
 const ARCH_SET_FS: u64 = 0x1002;
 const ARCH_GET_FS: u64 = 0x1003;
@@ -55,6 +59,8 @@ const EINVAL: i64 = -22;
 const ENOSYS: i64 = -38;
 const EAGAIN: i64 = -11;
 
+const CHILD_SLOT: usize = 3;
+const CHILD_PID: u64 = (CHILD_SLOT + 1) as u64;
 const USER_MMAP_START: u64 = 0x0000_0000_4010_0000;
 const USER_MMAP_END: u64 = 0x0000_0000_4017_0000;
 const USER_BRK_START: u64 = 0x0000_0000_4017_0000;
@@ -144,6 +150,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = access(frame.rdi as *const u8) as u64;
             true
         }
+        SYS_FACCESSAT => {
+            frame.rax = access(frame.rsi as *const u8) as u64;
+            true
+        }
         SYS_FCNTL => {
             frame.rax = fcntl(frame.rdi as i32, frame.rsi, frame.rdx) as u64;
             true
@@ -153,7 +163,17 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_GETPID => {
-            frame.rax = 4;
+            frame.rax = scheduler::current_user_index()
+                .map(|index| (index + 1) as u64)
+                .unwrap_or(1);
+            true
+        }
+        SYS_FORK => {
+            frame.rax = fork(frame) as u64;
+            true
+        }
+        SYS_EXECVE => {
+            frame.rax = execve(frame, frame.rdi as *const u8, frame.rsi as *const u64) as u64;
             true
         }
         SYS_UNAME => {
@@ -161,7 +181,22 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_WAIT4 => {
-            frame.rax = ECHILD as u64;
+            match scheduler::wait_for_child(frame, frame.rdi as i32) {
+                scheduler::WaitResult::Exited(pid) => {
+                    if frame.rsi != 0 {
+                        unsafe {
+                            *(frame.rsi as *mut i32) = 0;
+                        }
+                    }
+                    frame.rax = pid;
+                }
+                scheduler::WaitResult::Blocked(task_switch) => unsafe {
+                    crate::arch::load_cr3(task_switch.pml4_phys);
+                },
+                scheduler::WaitResult::NoChild => {
+                    frame.rax = ECHILD as u64;
+                }
+            }
             true
         }
         SYS_GETCWD => {
@@ -250,6 +285,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = getrandom(frame.rdi as *mut u8, frame.rsi as usize) as u64;
             true
         }
+        SYS_RSEQ => {
+            frame.rax = ENOSYS as u64;
+            true
+        }
         _ => {
             log_unknown_syscall(frame.rax);
             frame.rax = ENOSYS as u64;
@@ -259,7 +298,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
 }
 
 fn open(path: *const u8) -> i64 {
-    let Some(short_name) = path_to_fat_name(path) else {
+    let Some(short_name) = executable_or_plain_fat_name(path) else {
         return ENOENT;
     };
 
@@ -273,6 +312,49 @@ fn open(path: *const u8) -> i64 {
         file.offset = 0;
     }
     3
+}
+
+fn fork(frame: &scheduler::TrapFrame) -> i64 {
+    let Some(parent) = scheduler::current_user_index() else {
+        return EINVAL;
+    };
+    if !memory::copy_user_space(parent, CHILD_SLOT) {
+        return EINVAL;
+    }
+    scheduler::fork_current_user_to(CHILD_SLOT, frame).unwrap_or(CHILD_PID) as i64
+}
+
+fn execve(frame: &mut scheduler::TrapFrame, path: *const u8, argv: *const u64) -> i64 {
+    let Some(index) = scheduler::current_user_index() else {
+        return EINVAL;
+    };
+    let Some(mut fat_name) = path_to_fat_name(path) else {
+        return ENOENT;
+    };
+    if fat32::read_file(&fat_name).is_none() && fat_name[8..11] == [b' ', b' ', b' '] {
+        fat_name[8] = b'E';
+        fat_name[9] = b'L';
+        fat_name[10] = b'F';
+    }
+
+    let mut arg_storage = [[0u8; 64]; 4];
+    let mut arg_lens = [0usize; 4];
+    let mut arg_count = read_argv(argv, &mut arg_storage, &mut arg_lens);
+    if arg_count == 0 {
+        let fallback = path_basename(path, &mut arg_storage[0]);
+        arg_lens[0] = fallback;
+        arg_count = 1;
+    }
+    let mut args: [&[u8]; 4] = [b"", b"", b"", b""];
+    for arg_index in 0..arg_count {
+        args[arg_index] = &arg_storage[arg_index][..arg_lens[arg_index]];
+    }
+
+    if userland::exec_linux_elf(index, "exec", &fat_name, &args[..arg_count], frame) {
+        0
+    } else {
+        ENOENT
+    }
 }
 
 fn read(frame: &mut scheduler::TrapFrame, fd: i32, buffer: *mut u8, len: usize) -> Option<i64> {
@@ -463,7 +545,7 @@ fn stat_path(path: *const u8, stat_buf: *mut u8) -> i64 {
     if path_is_root_or_dot(path) {
         return write_fake_stat(stat_buf);
     }
-    let Some(short_name) = path_to_fat_name(path) else {
+    let Some(short_name) = executable_or_plain_fat_name(path) else {
         return ENOENT;
     };
     if fat32::read_file(&short_name).is_none() {
@@ -476,7 +558,7 @@ fn access(path: *const u8) -> i64 {
     if path_is_root_or_dot(path) {
         return 0;
     }
-    let Some(short_name) = path_to_fat_name(path) else {
+    let Some(short_name) = executable_or_plain_fat_name(path) else {
         return ENOENT;
     };
     if fat32::read_file(&short_name).is_some() {
@@ -760,6 +842,76 @@ fn path_to_fat_name(path: *const u8) -> Option<[u8; 11]> {
     }
 
     Some(out)
+}
+
+fn executable_or_plain_fat_name(path: *const u8) -> Option<[u8; 11]> {
+    let mut fat_name = path_to_fat_name(path)?;
+    if fat32::read_file(&fat_name).is_none() && fat_name[8..11] == [b' ', b' ', b' '] {
+        fat_name[8] = b'E';
+        fat_name[9] = b'L';
+        fat_name[10] = b'F';
+    }
+    Some(fat_name)
+}
+
+fn read_argv(argv: *const u64, storage: &mut [[u8; 64]; 4], lens: &mut [usize; 4]) -> usize {
+    if argv.is_null() {
+        return 0;
+    }
+
+    let mut count = 0usize;
+    unsafe {
+        while count < storage.len() {
+            let ptr = *(argv.add(count)) as *const u8;
+            if ptr.is_null() {
+                break;
+            }
+            lens[count] = read_user_cstr(ptr, &mut storage[count]);
+            if lens[count] == 0 {
+                break;
+            }
+            count += 1;
+        }
+    }
+    count
+}
+
+fn path_basename(path: *const u8, output: &mut [u8; 64]) -> usize {
+    if path.is_null() {
+        return 0;
+    }
+
+    let mut raw = [0u8; 64];
+    let len = read_user_cstr(path, &mut raw);
+    let mut start = 0usize;
+    for index in 0..len {
+        if raw[index] == b'/' {
+            start = index + 1;
+        }
+    }
+
+    let count = (len - start).min(output.len());
+    output[..count].copy_from_slice(&raw[start..start + count]);
+    count
+}
+
+fn read_user_cstr(path: *const u8, output: &mut [u8]) -> usize {
+    if path.is_null() {
+        return 0;
+    }
+
+    let mut len = 0usize;
+    unsafe {
+        while len < output.len() {
+            let byte = *path.add(len);
+            if byte == 0 {
+                break;
+            }
+            output[len] = byte;
+            len += 1;
+        }
+    }
+    len
 }
 
 fn path_is_root_or_dot(path: *const u8) -> bool {

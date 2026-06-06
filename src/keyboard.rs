@@ -103,6 +103,7 @@ fn decode(scancode: u8) -> Option<u8> {
         0x30 => Some(b'b'),
         0x31 => Some(b'n'),
         0x32 => Some(b'm'),
+        0x34 => Some(b'.'),
         _ => None,
     }
 }

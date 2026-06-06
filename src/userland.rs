@@ -204,19 +204,15 @@ pub fn install_first_task() {
     scheduler::set_user_task_active(3, false);
 }
 
-fn install_user_elf(
-    index: usize,
-    name: &'static str,
-    abi: UserAbi,
-    fat_name: &[u8; 11],
-) -> bool {
+fn install_user_elf(index: usize, name: &'static str, abi: UserAbi, fat_name: &[u8; 11]) -> bool {
     if let Some(image) = crate::fat32::read_file(fat_name) {
         if !memory::clear_user_image(index) {
             return false;
         }
         if let Some(entry) = load_elf(index, image) {
             let stack_top = if matches!(abi, UserAbi::Linux) {
-                linux_stack_top(index, name).unwrap_or_else(|| memory::user_stack_top(index))
+                let args: [&[u8]; 4] = [name.as_bytes(), b"--noprofile", b"--norc", b"-i"];
+                linux_stack_top(index, &args).unwrap_or_else(|| memory::user_stack_top(index))
             } else {
                 memory::user_stack_top(index)
             };
@@ -249,7 +245,33 @@ fn install_user_elf(
     }
 }
 
-fn linux_stack_top(index: usize, argv0: &'static str) -> Option<VirtAddr> {
+pub fn exec_linux_elf(
+    index: usize,
+    task_name: &'static str,
+    fat_name: &[u8; 11],
+    argv: &[&[u8]],
+    frame: &mut TrapFrame,
+) -> bool {
+    let Some(image) = crate::fat32::read_file(fat_name) else {
+        return false;
+    };
+    if !memory::clear_user_image(index) {
+        return false;
+    }
+    let Some(entry) = load_elf(index, image) else {
+        return false;
+    };
+    let Some(stack_top) = linux_stack_top(index, argv) else {
+        return false;
+    };
+
+    let new_frame = new_task_frame(UserAbi::Linux, entry, stack_top);
+    scheduler::replace_user_task_frame(index, task_name, UserAbi::Linux, new_frame);
+    *frame = new_frame;
+    true
+}
+
+fn linux_stack_top(index: usize, argv: &[&[u8]]) -> Option<VirtAddr> {
     const AT_NULL: u64 = 0;
     const AT_PAGESZ: u64 = 6;
     const AT_UID: u64 = 11;
@@ -259,15 +281,17 @@ fn linux_stack_top(index: usize, argv0: &'static str) -> Option<VirtAddr> {
     const AT_SECURE: u64 = 23;
 
     let stack_base = memory::user_stack_top(index) - memory::USER_STACK_SIZE as u64;
-    let argv = [argv0.as_bytes(), b"--noprofile", b"--norc", b"-i"];
-    let term = b"TERM=vt100";
+    let env = [b"TERM=vt100".as_slice(), b"PATH=/".as_slice()];
 
     if !memory::clear_user_stack(index) {
         return None;
     }
 
     let mut cursor = memory::USER_STACK_SIZE;
-    let mut argv_addrs = [0u64; 4];
+    let mut argv_addrs = [0u64; 8];
+    if argv.len() > argv_addrs.len() {
+        return None;
+    }
     for (arg_index, arg) in argv.iter().enumerate().rev() {
         cursor = align_down(cursor.checked_sub(arg.len() + 1)?, 8);
         argv_addrs[arg_index] = stack_base + cursor as u64;
@@ -278,12 +302,15 @@ fn linux_stack_top(index: usize, argv0: &'static str) -> Option<VirtAddr> {
         }
     }
 
-    cursor = align_down(cursor.checked_sub(term.len() + 1)?, 8);
-    let term_addr = stack_base + cursor as u64;
-    if !memory::write_user_stack(index, cursor, term)
-        || !memory::write_user_stack(index, cursor + term.len(), &[0])
-    {
-        return None;
+    let mut env_addrs = [0u64; 2];
+    for (env_index, env_value) in env.iter().enumerate().rev() {
+        cursor = align_down(cursor.checked_sub(env_value.len() + 1)?, 8);
+        env_addrs[env_index] = stack_base + cursor as u64;
+        if !memory::write_user_stack(index, cursor, env_value)
+            || !memory::write_user_stack(index, cursor + env_value.len(), &[0])
+        {
+            return None;
+        }
     }
 
     cursor = align_down(cursor.checked_sub(16)?, 16);
@@ -299,15 +326,23 @@ fn linux_stack_top(index: usize, argv0: &'static str) -> Option<VirtAddr> {
         return None;
     }
 
-    let words = [
-        argv.len() as u64,
-        argv_addrs[0],
-        argv_addrs[1],
-        argv_addrs[2],
-        argv_addrs[3],
-        0,
-        term_addr,
-        0,
+    let mut words = [0u64; 32];
+    let mut word_count = 0usize;
+    words[word_count] = argv.len() as u64;
+    word_count += 1;
+    for arg_addr in &argv_addrs[..argv.len()] {
+        words[word_count] = *arg_addr;
+        word_count += 1;
+    }
+    words[word_count] = 0;
+    word_count += 1;
+    for env_addr in env_addrs {
+        words[word_count] = env_addr;
+        word_count += 1;
+    }
+    words[word_count] = 0;
+    word_count += 1;
+    let auxv = [
         AT_PAGESZ,
         4096,
         AT_UID,
@@ -325,9 +360,13 @@ fn linux_stack_top(index: usize, argv0: &'static str) -> Option<VirtAddr> {
         AT_NULL,
         0,
     ];
+    for word in auxv {
+        words[word_count] = word;
+        word_count += 1;
+    }
 
-    cursor = align_down(cursor.checked_sub(words.len() * 8)?, 16);
-    for (word_index, word) in words.iter().enumerate() {
+    cursor = align_down(cursor.checked_sub(word_count * 8)?, 16);
+    for (word_index, word) in words[..word_count].iter().enumerate() {
         if !memory::write_user_stack(index, cursor + word_index * 8, &word.to_le_bytes()) {
             return None;
         }
@@ -358,35 +397,35 @@ fn install_task_frame(
     entry: VirtAddr,
     stack_top: VirtAddr,
 ) {
+    let frame = new_task_frame(abi, entry, stack_top);
+    scheduler::install_user_task(index, name, abi, pml4_phys, frame);
+}
+
+fn new_task_frame(abi: UserAbi, entry: VirtAddr, stack_top: VirtAddr) -> TrapFrame {
     let (code, data) = gdt::user_selectors();
-    scheduler::install_user_task(
-        index,
-        name,
-        abi,
-        pml4_phys,
-        TrapFrame {
-            r15: 0,
-            r14: 0,
-            r13: 0,
-            r12: 0,
-            r11: 0,
-            r10: 0,
-            r9: 0,
-            r8: 0,
-            rdi: 0,
-            rsi: 0,
-            rbp: 0,
-            rbx: 0,
-            rdx: 0,
-            rcx: 0,
-            rax: 0,
-            rip: entry,
-            cs: code as u64,
-            rflags: 0x202,
-            rsp: stack_top,
-            ss: data as u64,
-        },
-    );
+    let _ = abi;
+    TrapFrame {
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        r11: 0,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rdi: 0,
+        rsi: 0,
+        rbp: 0,
+        rbx: 0,
+        rdx: 0,
+        rcx: 0,
+        rax: 0,
+        rip: entry,
+        cs: code as u64,
+        rflags: 0x202,
+        rsp: stack_top,
+        ss: data as u64,
+    }
 }
 
 fn load_elf(task_index: usize, image: &[u8]) -> Option<u64> {

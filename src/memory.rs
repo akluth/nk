@@ -363,6 +363,24 @@ pub fn copy_user_segment(index: usize, virt: u64, data: &[u8], mem_size: usize) 
     true
 }
 
+pub fn copy_user_space(source: usize, target: usize) -> bool {
+    if source >= USER_TASKS || target >= USER_TASKS {
+        return false;
+    }
+
+    unsafe {
+        let images = &mut (*core::ptr::addr_of_mut!(USER_IMAGES)).images;
+        let source_image = images[source];
+        images[target] = source_image;
+
+        let stacks = &mut (*core::ptr::addr_of_mut!(USER_STACKS)).stacks;
+        let source_stack = stacks[source];
+        stacks[target] = source_stack;
+    }
+
+    true
+}
+
 pub fn write_user_stack(index: usize, offset: usize, data: &[u8]) -> bool {
     if offset
         .checked_add(data.len())
