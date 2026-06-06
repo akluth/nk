@@ -227,9 +227,16 @@ char **argv;
     return(0);
 }
 
-void _start(void)
+__asm__(
+    ".global _start\n"
+    "_start:\n"
+    "    mov %rsp, %rdi\n"
+    "    call nk_start\n");
+
+void nk_start(unsigned long *stack)
 {
-    char *argv[] = { "cat", "/HELLO.TXT", 0 };
-    int code = cat_main(2, argv);
+    int argc = (int)stack[0];
+    char **argv = (char **)&stack[1];
+    int code = cat_main(argc, argv);
     exit(code);
 }

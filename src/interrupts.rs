@@ -537,6 +537,7 @@ extern "C" fn rust_keyboard_interrupt() {
     let scancode = unsafe { arch::inb(0x60) };
     if let Some(byte) = keyboard::decode_scancode(scancode) {
         if let Some(wake) = scheduler::wake_stdin_waiter() {
+            linux_abi::echo_stdin_key(byte);
             unsafe {
                 let current_pml4 = arch::read_cr3();
                 arch::load_cr3(wake.pml4_phys);

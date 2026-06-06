@@ -220,16 +220,31 @@ fn draw_console(x: u64, y: u64, width: u64, height: u64) {
     let mut line_lens = [0usize; 28];
     let mut row = 0usize;
     let mut col = 0usize;
-    let start = len.saturating_sub(cols * rows);
+    let start = 0;
 
     for index in start..len {
         let byte = syscall1(SYS_CONSOLE_BYTE, index as u64) as u8;
         if byte == b'\r' {
+            col = 0;
             continue;
         }
         if byte == b'\n' {
-            row = (row + 1).min(rows.saturating_sub(1));
+            if row + 1 < rows.min(28) {
+                row += 1;
+            } else {
+                scroll_console(&mut lines, &mut line_lens, rows.min(28));
+            }
             col = 0;
+            continue;
+        }
+        if byte == 8 {
+            if col > 0 {
+                col -= 1;
+                if row < rows.min(28) {
+                    lines[row][col] = 0;
+                    line_lens[row] = col;
+                }
+            }
             continue;
         }
         if row < rows && col < cols.min(96) {
@@ -245,6 +260,18 @@ fn draw_console(x: u64, y: u64, width: u64, height: u64) {
     for line in 0..rows.min(28) {
         text_bytes(x, y + line as u64 * 16, &lines[line][..line_lens[line]], TERM_FG);
     }
+}
+
+fn scroll_console(lines: &mut [[u8; 96]; 28], line_lens: &mut [usize; 28], rows: usize) {
+    if rows == 0 {
+        return;
+    }
+    for row in 1..rows {
+        lines[row - 1] = lines[row];
+        line_lens[row - 1] = line_lens[row];
+    }
+    lines[rows - 1] = [0; 96];
+    line_lens[rows - 1] = 0;
 }
 
 fn draw_task_row(x: u64, y: u64, info: u64) {

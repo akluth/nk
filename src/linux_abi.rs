@@ -393,6 +393,7 @@ fn read_stdin(frame: &mut scheduler::TrapFrame, buffer: *mut u8, len: usize) -> 
     }
 
     if let Some(key) = keyboard::pop_key() {
+        echo_stdin_key(key);
         unsafe {
             *buffer = key;
         }
@@ -406,6 +407,14 @@ fn read_stdin(frame: &mut scheduler::TrapFrame, buffer: *mut u8, len: usize) -> 
         None
     } else {
         Some(EAGAIN)
+    }
+}
+
+pub fn echo_stdin_key(byte: u8) {
+    if byte == 8 {
+        services::gui::console_write(&[8]);
+    } else {
+        services::gui::console_write(&[byte]);
     }
 }
 
