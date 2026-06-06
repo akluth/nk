@@ -16,11 +16,23 @@ if [ ! -d "$LIMINE" ]; then
   git clone --depth 1 --branch v9.x-binary https://github.com/limine-bootloader/limine.git "$LIMINE"
 fi
 
+ensure_limine_tool() {
+  if [ -x "$LIMINE/limine" ]; then
+    return
+  fi
+  if [ ! -f "$LIMINE/Makefile" ] || [ ! -f "$LIMINE/limine.c" ]; then
+    echo "Limine host tool fehlt und kann nicht gebaut werden. Loesche third_party/limine und starte das Skript erneut." >&2
+    exit 1
+  fi
+  make -C "$LIMINE" limine
+}
+
 if command -v rustup >/dev/null 2>&1; then
   rustup target add x86_64-unknown-none
 fi
 
 cargo build --release
+ensure_limine_tool
 
 rm -rf "$BUILD"
 mkdir -p "$ISO_ROOT/boot" "$ISO_ROOT/EFI/BOOT"
