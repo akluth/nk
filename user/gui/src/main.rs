@@ -22,6 +22,7 @@ const TASK_TASKVIEW: u64 = 2;
 const SCREEN_W: u64 = 1280;
 const SCREEN_H: u64 = 720;
 const TOP_H: u64 = 30;
+const BOTTOM_H: u64 = 24;
 
 const DESKTOP: u32 = 0x002c3333;
 const PANEL: u32 = 0x00e8ebe7;
@@ -38,7 +39,6 @@ const LIGHT: u32 = 0x00ffffff;
 const TERM_BG: u32 = 0x0010161c;
 const TERM_FG: u32 = 0x00d7e1d8;
 const ACCENT: u32 = 0x0000b894;
-const CURSOR: u32 = 0x00f5c542;
 
 #[derive(Clone, Copy)]
 struct Mouse {
@@ -94,35 +94,45 @@ pub extern "C" fn _start() -> ! {
         if mouse.seq != last_mouse_seq {
             let pressed = mouse.buttons & 1 != 0;
             let was_pressed = last_mouse.buttons & 1 != 0;
+            let mut mouse_needs_redraw = false;
 
             if pressed && !was_pressed {
                 if hit_task_button(mouse) {
                     show_tasks = true;
                     syscall1(SYS_SET_FOCUS, TASK_TASKVIEW);
+                    mouse_needs_redraw = true;
                 } else if hit_window_title(mouse, terminal) {
                     syscall1(SYS_SET_FOCUS, TASK_BASH);
                     dragging_terminal = true;
                     drag_dx = mouse.x.saturating_sub(terminal.x);
                     drag_dy = mouse.y.saturating_sub(terminal.y);
+                    mouse_needs_redraw = true;
                 } else if hit_window(mouse, terminal) {
                     syscall1(SYS_SET_FOCUS, TASK_BASH);
+                    mouse_needs_redraw = true;
                 } else if show_tasks && hit_window(mouse, tasks) {
                     syscall1(SYS_SET_FOCUS, TASK_TASKVIEW);
+                    mouse_needs_redraw = true;
                 }
             }
 
             if !pressed {
+                mouse_needs_redraw |= dragging_terminal;
                 dragging_terminal = false;
             }
 
             if dragging_terminal {
                 terminal.x = mouse.x.saturating_sub(drag_dx).clamp(16, SCREEN_W - terminal.w - 16);
-                terminal.y = mouse.y.saturating_sub(drag_dy).clamp(TOP_H + 10, SCREEN_H - terminal.h - 18);
+                terminal.y = mouse
+                    .y
+                    .saturating_sub(drag_dy)
+                    .clamp(TOP_H + 10, SCREEN_H - BOTTOM_H - terminal.h - 18);
+                mouse_needs_redraw = true;
             }
 
             last_mouse = mouse;
             last_mouse_seq = mouse.seq;
-            needs_redraw = true;
+            needs_redraw |= mouse_needs_redraw;
         }
 
         if needs_redraw {
@@ -138,13 +148,14 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn redraw(terminal: Window, tasks: Window, show_tasks: bool, mouse: Mouse) {
+    let _ = mouse;
     syscall1(SYS_GUI_CLEAR, DESKTOP as u64);
     draw_top_bar(show_tasks);
+    draw_bottom_bar();
     draw_terminal(terminal, syscall0(SYS_FOCUS) == TASK_BASH);
     if show_tasks {
         draw_taskviewer(tasks, syscall0(SYS_FOCUS) == TASK_TASKVIEW);
     }
-    draw_pointer(mouse.x, mouse.y);
 }
 
 fn draw_top_bar(show_tasks: bool) {
@@ -155,6 +166,20 @@ fn draw_top_bar(show_tasks: bool) {
     text(72, 6, b"Terminal", MUTED);
     rect(1144, 4, 92, 22, if show_tasks { BUTTON_ACTIVE } else { BUTTON });
     text(1160, 6, b"Tasks", if show_tasks { LIGHT } else { INK });
+}
+
+fn draw_bottom_bar() {
+    let y = SCREEN_H - BOTTOM_H;
+    rect(0, y, SCREEN_W, BOTTOM_H, PANEL);
+    rect(0, y, SCREEN_W, 1, PANEL_DARK);
+    let focus = syscall0(SYS_FOCUS);
+    bottom_entry(12, b"bash", focus == TASK_BASH);
+    bottom_entry(128, b"taskviewer", focus == TASK_TASKVIEW);
+}
+
+fn bottom_entry(x: u64, label: &'static [u8], active: bool) {
+    rect(x, SCREEN_H - BOTTOM_H + 4, 102, 16, if active { BUTTON_ACTIVE } else { BUTTON });
+    text(x + 10, SCREEN_H - BOTTOM_H + 5, label, if active { LIGHT } else { INK });
 }
 
 fn draw_terminal(win: Window, active: bool) {
@@ -256,13 +281,6 @@ fn hit_window(mouse: Mouse, win: Window) -> bool {
 
 fn hit_window_title(mouse: Mouse, win: Window) -> bool {
     hit_window(mouse, win) && mouse.y < win.y + 42
-}
-
-fn draw_pointer(x: u64, y: u64) {
-    rect(x, y, 3, 18, CURSOR);
-    rect(x + 3, y + 3, 3, 12, CURSOR);
-    rect(x + 6, y + 6, 3, 9, CURSOR);
-    rect(x + 9, y + 9, 3, 6, CURSOR);
 }
 
 fn read_mouse() -> Mouse {
