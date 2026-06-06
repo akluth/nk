@@ -9,6 +9,13 @@ $ThirdParty = Join-Path $Root "third_party"
 $Archive = Join-Path $ThirdParty "bash-$Version.tar.gz"
 $Source = Join-Path $ThirdParty "bash-$Version"
 $PatchDir = Join-Path $ThirdParty "bash-$Version-patches"
+$Tar = "tar"
+if ($env:WINDIR) {
+    $SystemTar = Join-Path $env:WINDIR "System32\tar.exe"
+    if (Test-Path $SystemTar) {
+        $Tar = $SystemTar
+    }
+}
 
 New-Item -ItemType Directory -Force -Path $ThirdParty | Out-Null
 
@@ -34,7 +41,7 @@ function Test-TarGz {
     if (-not (Test-Path $Path) -or (Get-Item $Path).Length -lt 1024) {
         return $false
     }
-    tar --force-local -tzf $Path > $null
+    & $Tar -tzf $Path > $null
     return $LASTEXITCODE -eq 0
 }
 
@@ -49,7 +56,7 @@ if (-not (Test-TarGz $Archive)) {
 
 if (-not (Test-Path (Join-Path $Source "configure"))) {
     Remove-Item -LiteralPath $Source -Recurse -Force -ErrorAction SilentlyContinue
-    tar --force-local -xzf $Archive -C $ThirdParty
+    & $Tar -xzf $Archive -C $ThirdParty
     if ($LASTEXITCODE -ne 0) {
         Remove-Item -LiteralPath $Source -Recurse -Force -ErrorAction SilentlyContinue
         throw "Failed to extract Bash archive: $Archive"
