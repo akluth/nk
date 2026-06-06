@@ -193,11 +193,8 @@ pub fn install_page_table_roots(roots: [Option<PageTableRoot>; scheduler::USER_T
 
 pub fn install_first_task() {
     install_user_elf(0, "gui", UserAbi::Native, b"GUI     ELF");
-    if install_user_elf(1, "bash", UserAbi::Linux, b"BASH    ELF") {
-        serial::write_line("nk: bash process installed beside gui");
-    } else {
-        serial::write_line("nk: bash elf missing; using temporary terminal fallback");
-        install_user_elf(1, "terminal", UserAbi::Native, b"SHELL   ELF");
+    if !install_user_elf(1, "bash", UserAbi::Linux, b"BASH    ELF") {
+        serial::write_line("nk: bash elf missing; no terminal process installed");
     }
     install_user_elf(2, "taskviewer", UserAbi::Native, b"TASKVIEWELF");
     install_user_elf(3, "cat", UserAbi::Linux, b"CAT     ELF");

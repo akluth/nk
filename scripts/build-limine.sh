@@ -60,7 +60,6 @@ build_c_user_program() {
 }
 
 build_user_program gui
-build_user_program shell
 build_user_program taskview
 build_c_user_program cat
 if [ -f "$ROOT/third_party/bash-5.3/bash" ]; then
@@ -69,7 +68,6 @@ fi
 
 app_files=(
   "$BUILD/user/gui.elf"
-  "$BUILD/user/shell.elf"
   "$BUILD/user/taskview.elf"
   "$BUILD/user/cat.elf"
 )

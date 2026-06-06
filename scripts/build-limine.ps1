@@ -134,7 +134,6 @@ Remove-Item -Recurse -Force $Build -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path (Join-Path $IsoRoot "boot") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $IsoRoot "EFI\BOOT") | Out-Null
 Build-UserProgram "gui"
-Build-UserProgram "shell"
 Build-UserProgram "taskview"
 Build-CUserProgram "cat"
 $BashPortElf = Join-Path $Root "third_party\bash-5.3\bash"
@@ -144,7 +143,6 @@ if (Test-Path $BashPortElf) {
 
 $AppFiles = @(
     (Join-Path $Build "user\gui.elf"),
-    (Join-Path $Build "user\shell.elf"),
     (Join-Path $Build "user\taskview.elf"),
     (Join-Path $Build "user\cat.elf")
 )

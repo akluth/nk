@@ -12,19 +12,19 @@ FAT32 application disk.
 - Builds a dedicated userland page-table root.
 - Starts Ring 3 tasks through `iretq` and saved trapframes.
 - Uses timer interrupt trapframes as scheduler context.
-- Builds a FAT32 application disk containing `GUI.ELF`, `SHELL.ELF`, and
+- Builds a FAT32 application disk containing `GUI.ELF`, `BASH.ELF`,
   `TASKVIEW.ELF`, `CAT.ELF`, plus small data files.
 - Reads that FAT32 disk through a first ATA PIO block-device path.
 - Parses userland ELF files from the FAT32 application disk and starts them as
   Ring 3 tasks.
 - Provides minimal GUI syscalls for clearing the screen, drawing rectangles,
   and drawing scaled bitmap text.
-- Starts a passive userland GUI ELF that paints a MATE-style desktop frame with
-  a top menu panel and a bottom task list for window switching.
-- Boots a real static GNU Bash 5.3 `BASH.ELF` as the primary user process when
-  that binary is present on the FAT32 application disk.
-- Falls back to the old Rust terminal ELF only when `BASH.ELF` is missing.
-- Starts a third userland task viewer ELF that displays the running user tasks.
+- Starts a userland GUI ELF that owns the compositor, paints the desktop, and
+  shows Bash in the default terminal window.
+- Boots a real static GNU Bash 5.3 `BASH.ELF` as the standard second user
+  process.
+- Starts a third userland task viewer ELF; the GUI compositor renders its
+  window from task metadata.
 - Starts a fourth userland C `cat` ELF based on the original V7 UNIX `cat.c`
   program body and prints a FAT32 file through a small Linux-like syscall
   compatibility layer.
@@ -38,9 +38,9 @@ FAT32 application disk.
   switching without making the kernel depend on specific GUI programs.
 - Delivers PS/2 keyboard input through IRQ1 and a small `read_key` syscall.
 - Delivers PS/2 mouse input through IRQ12 and a small `read_mouse` syscall.
-- Supports the shell commands `version`, `cat`, and `shutdown`.
-- The `cat` command starts the separate `CAT.ELF` user task on demand; that
-  program reads `/HELLO.TXT` from the FAT32 application disk.
+- Bash can start the separate `CAT.ELF` user task through the minimal
+  `fork`/`execve`/`wait4` path; `cat hello.txt` reads `HELLO.TXT` from the
+  FAT32 application disk.
 
 ## Architecture
 
@@ -69,10 +69,8 @@ FAT32 application disk.
 - `src/limine.rs`: Limine framebuffer, HHDM, and kernel address requests.
 - `src/pci.rs` and `src/virtio.rs`: PCI scan, Virtio capability discovery, and
   early queue memory setup.
-- `user/gui/src/main.rs`: separate no_std Rust GUI executable.
+- `user/gui/src/main.rs`: separate no_std Rust GUI/compositor executable.
 - `user/gui/linker.ld`: GUI ELF linker script.
-- `user/shell/src/main.rs`: separate no_std Rust shell executable.
-- `user/shell/linker.ld`: shell ELF linker script.
 - `user/taskview/src/main.rs`: separate no_std Rust task viewer executable.
 - `user/taskview/linker.ld`: task viewer ELF linker script.
 - `user/cat/src/cat.c`: separate C `cat` executable using the V7 UNIX `cat.c`
@@ -115,11 +113,10 @@ The build script creates both:
 
 - `target/x86_64-unknown-none/release/nk`: the kernel.
 - `build/user/gui.elf`: the separate userland GUI executable.
-- `build/user/shell.elf`: the separate userland shell executable.
 - `build/user/taskview.elf`: the separate userland task viewer executable.
 - `build/user/cat.elf`: the separate userland C cat executable.
-- `build/user/bash.elf`: GNU Bash executable; when present it is copied to the
-  app disk as `BASH.ELF` and replaces the fallback terminal.
+- `build/user/bash.elf`: GNU Bash executable; it is copied to the app disk as
+  `BASH.ELF` and started as the standard terminal process.
 - `build/nk-apps.fat32`: the FAT32 disk image containing the user programs.
 
 The ISO only contains the kernel and bootloader files. User programs are loaded
@@ -174,11 +171,10 @@ $disk = "$PWD\build\virtio-test.img"
 
 - Add a real compositor/window manager so applications submit private window
   buffers instead of drawing directly into the shared framebuffer.
-- Restore GUI, task viewer, and Bash as concurrent isolated user tasks. Bash now
-  boots as the primary user process; the old shared user image is not enough for
-  multiple large ELF programs at the same virtual base.
-- Add `fork`, `execve`, `waitpid`, pipes, signals, termios/TTY handling, and
-  argv/envp/auxv setup for Bash and other real Linux/POSIX programs.
+- Extend the current single-child `fork`/`execve`/`wait4` implementation into a
+  real process table with multiple children and reaping.
+- Add pipes, descriptor duplication, signals, termios/TTY handling, and
+  job-control semantics for Bash and other real Linux/POSIX programs.
 - Load a real PSF/SSFN font from the app disk instead of compiling the generated
   bitmap table into the kernel.
 - Add dirty-rectangle or double-buffered drawing to remove the remaining direct
