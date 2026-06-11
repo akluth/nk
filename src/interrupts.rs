@@ -82,7 +82,6 @@ struct IdtPointer {
 
 static mut IDT: [IdtEntry; IDT_ENTRIES] = [IdtEntry::missing(); IDT_ENTRIES];
 static mut TIMER_TICKS: u64 = 0;
-static mut USER_SWITCH_LOGS: u64 = 0;
 
 #[no_mangle]
 static mut SYSCALL_STACK_TOP: u64 = 0;
@@ -576,18 +575,12 @@ extern "C" fn rust_timer_interrupt(frame: *mut scheduler::TrapFrame) {
     unsafe {
         TIMER_TICKS = TIMER_TICKS.wrapping_add(1);
         let scheduler_ticks = scheduler::tick();
-        if TIMER_TICKS == 1 || TIMER_TICKS % 100 == 0 {
+        if TIMER_TICKS == 1 {
             serial::write_line("nk: timer interrupt");
         }
         if let Some(task_switch) = scheduler::schedule_user(&mut *frame) {
             arch::load_cr3(task_switch.pml4_phys);
-            USER_SWITCH_LOGS = USER_SWITCH_LOGS.wrapping_add(1);
-            if USER_SWITCH_LOGS > 16 && USER_SWITCH_LOGS % 100 != 0 {
-                send_eoi(0);
-                return;
-            }
-            serial::write_str("nk: switched to ");
-            serial::write_line(task_switch.name);
+            let _ = task_switch.name;
         }
         let _ = scheduler_ticks;
         send_eoi(0);
@@ -641,7 +634,6 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
     match frame.rax {
         0 => {}
         60 | 231 if frame.cs & 0x3 == 0x3 => {
-            serial::write_line("nk: user task exited via fallback");
             if let Some(pml4_phys) = scheduler::exit_current_user(frame) {
                 unsafe {
                     arch::load_cr3(pml4_phys);

@@ -54,7 +54,6 @@ pub fn read_file(path: &[u8]) -> Option<&'static [u8]> {
         ptr::addr_of_mut!(FILE_BUFFER).cast(),
         MAX_FILE_SIZE,
     )?;
-    serial::write_line("nk: nkfs file loaded");
     unsafe { Some(&FILE_BUFFER[..inode.size]) }
 }
 
