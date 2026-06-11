@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 
-use crate::{arch, fat32, keyboard, memory, scheduler, serial, services, userland};
+use crate::{arch, fat32, memory, scheduler, serial, services, userland};
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
@@ -86,6 +86,13 @@ struct GlobalOpenFile(UnsafeCell<OpenFile>);
 unsafe impl Sync for GlobalOpenFile {}
 
 static FILE3: GlobalOpenFile = GlobalOpenFile(UnsafeCell::new(OpenFile::empty()));
+const INPUT_LINE_CAP: usize = 256;
+const READY_INPUT_CAP: usize = 512;
+static mut INPUT_LINE: [u8; INPUT_LINE_CAP] = [0; INPUT_LINE_CAP];
+static mut INPUT_LINE_LEN: usize = 0;
+static mut READY_INPUT: [u8; READY_INPUT_CAP] = [0; READY_INPUT_CAP];
+static mut READY_READ: usize = 0;
+static mut READY_WRITE: usize = 0;
 static mut MMAP_CURSOR: u64 = USER_MMAP_START;
 static mut PROGRAM_BREAK: u64 = USER_BRK_START;
 static mut UNKNOWN_LOGS: u64 = 0;
@@ -414,12 +421,8 @@ fn read_stdin(frame: &mut scheduler::TrapFrame, buffer: *mut u8, len: usize) -> 
         return Some(0);
     }
 
-    if let Some(key) = keyboard::pop_key() {
-        echo_stdin_key(key);
-        unsafe {
-            *buffer = key;
-        }
-        return Some(1);
+    if let Some(count) = pop_ready_input(buffer, len) {
+        return Some(count as i64);
     }
 
     if let Some(task_switch) = scheduler::block_current_for_stdin(frame, buffer as u64) {
@@ -432,11 +435,81 @@ fn read_stdin(frame: &mut scheduler::TrapFrame, buffer: *mut u8, len: usize) -> 
     }
 }
 
-pub fn echo_stdin_key(byte: u8) {
-    if byte == 8 {
+pub fn handle_stdin_key(byte: u8) {
+    unsafe {
+        match byte {
+            8 | 127 => {
+                if INPUT_LINE_LEN > 0 {
+                    INPUT_LINE_LEN -= 1;
+                    echo_stdin_key(8);
+                }
+            }
+            b'\n' | b'\r' => {
+                echo_stdin_key(b'\n');
+                push_ready_input(b'\n');
+                INPUT_LINE_LEN = 0;
+                wake_stdin_reader();
+            }
+            byte if byte >= 0x20 && INPUT_LINE_LEN < INPUT_LINE_CAP - 1 => {
+                INPUT_LINE[INPUT_LINE_LEN] = byte;
+                INPUT_LINE_LEN += 1;
+                echo_stdin_key(byte);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn echo_stdin_key(byte: u8) {
+    if byte == 8 || byte == 127 {
         services::gui::console_write(&[8]);
     } else {
         services::gui::console_write(&[byte]);
+    }
+}
+
+unsafe fn push_ready_input(byte: u8) {
+    for index in 0..INPUT_LINE_LEN {
+        let next = (READY_WRITE + 1) % READY_INPUT_CAP;
+        if next == READY_READ {
+            break;
+        }
+        READY_INPUT[READY_WRITE] = INPUT_LINE[index];
+        READY_WRITE = next;
+    }
+    let next = (READY_WRITE + 1) % READY_INPUT_CAP;
+    if next != READY_READ {
+        READY_INPUT[READY_WRITE] = byte;
+        READY_WRITE = next;
+    }
+}
+
+fn pop_ready_input(buffer: *mut u8, len: usize) -> Option<usize> {
+    unsafe {
+        if READY_READ == READY_WRITE {
+            return None;
+        }
+        let mut count = 0usize;
+        while count < len && READY_READ != READY_WRITE {
+            *buffer.add(count) = READY_INPUT[READY_READ];
+            READY_READ = (READY_READ + 1) % READY_INPUT_CAP;
+            count += 1;
+        }
+        Some(count)
+    }
+}
+
+unsafe fn wake_stdin_reader() {
+    if let Some(wake) = scheduler::wake_stdin_waiter() {
+        if READY_READ == READY_WRITE {
+            return;
+        }
+        let byte = READY_INPUT[READY_READ];
+        READY_READ = (READY_READ + 1) % READY_INPUT_CAP;
+        let current_pml4 = arch::read_cr3();
+        arch::load_cr3(wake.pml4_phys);
+        *(wake.buffer as *mut u8) = byte;
+        arch::load_cr3(current_pml4);
     }
 }
 
@@ -639,6 +712,7 @@ fn write_termios(argp: *mut u8) -> i64 {
         for (index, byte) in lflag.iter().enumerate() {
             *argp.add(12 + index) = *byte;
         }
+        *argp.add(19) = 8;
     }
     0
 }

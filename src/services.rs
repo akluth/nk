@@ -26,6 +26,9 @@ pub mod gui {
     static mut TERM_LENS: [usize; TERM_MAX_ROWS] = [0; TERM_MAX_ROWS];
     static mut TEXT_COL: usize = 0;
     static mut TEXT_ROW: usize = 0;
+    static mut ANSI_STATE: u8 = 0;
+    static mut CSI_VALUE: usize = 0;
+    static mut CSI_HAS_VALUE: bool = false;
 
     pub fn install(framebuffer: Framebuffer) {
         unsafe {
@@ -122,6 +125,11 @@ pub mod gui {
             return;
         };
 
+        if handle_ansi_byte(byte, cols) {
+            return;
+        }
+
+        hide_cursor();
         match byte {
             b'\r' => {
                 TEXT_COL = 0;
@@ -134,7 +142,7 @@ pub mod gui {
                     TEXT_ROW = rows.saturating_sub(1);
                 }
             }
-            8 => {
+            8 | 127 => {
                 if TEXT_COL > 0 {
                     TEXT_COL -= 1;
                     TERM_BYTES[TEXT_ROW][TEXT_COL] = 0;
@@ -158,6 +166,7 @@ pub mod gui {
             }
             _ => {}
         }
+        show_cursor();
     }
 
     unsafe fn terminal_grid() -> Option<(usize, usize)> {
@@ -173,6 +182,9 @@ pub mod gui {
         TERM_LENS = [0; TERM_MAX_ROWS];
         TEXT_COL = 0;
         TEXT_ROW = 0;
+        ANSI_STATE = 0;
+        CSI_VALUE = 0;
+        CSI_HAS_VALUE = false;
     }
 
     fn reset_terminal_screen() {
@@ -190,6 +202,79 @@ pub mod gui {
         TERM_BYTES[rows - 1] = [0; TERM_MAX_COLS];
         TERM_LENS[rows - 1] = 0;
         redraw_terminal(rows, cols);
+    }
+
+    unsafe fn handle_ansi_byte(byte: u8, cols: usize) -> bool {
+        match ANSI_STATE {
+            0 => {
+                if byte == 0x1b {
+                    ANSI_STATE = 1;
+                    return true;
+                }
+                false
+            }
+            1 => {
+                if byte == b'[' {
+                    ANSI_STATE = 2;
+                    CSI_VALUE = 0;
+                    CSI_HAS_VALUE = false;
+                } else {
+                    ANSI_STATE = 0;
+                }
+                true
+            }
+            _ => {
+                if byte.is_ascii_digit() {
+                    CSI_VALUE = CSI_VALUE
+                        .saturating_mul(10)
+                        .saturating_add((byte - b'0') as usize);
+                    CSI_HAS_VALUE = true;
+                    return true;
+                }
+                if byte == b'?' || byte == b';' {
+                    return true;
+                }
+
+                hide_cursor();
+                let value = if CSI_HAS_VALUE { CSI_VALUE } else { 1 };
+                match byte {
+                    b'G' => {
+                        TEXT_COL = value.saturating_sub(1).min(cols.saturating_sub(1));
+                    }
+                    b'C' => {
+                        TEXT_COL = TEXT_COL.saturating_add(value).min(cols.saturating_sub(1));
+                    }
+                    b'D' => {
+                        TEXT_COL = TEXT_COL.saturating_sub(value);
+                    }
+                    b'H' | b'f' => {
+                        TEXT_COL = 0;
+                        TEXT_ROW = 0;
+                    }
+                    b'J' => {
+                        reset_terminal_screen();
+                    }
+                    b'K' => {
+                        erase_to_end_of_line(cols);
+                    }
+                    b'h' | b'l' | b'm' => {}
+                    _ => {}
+                }
+                ANSI_STATE = 0;
+                CSI_VALUE = 0;
+                CSI_HAS_VALUE = false;
+                show_cursor();
+                true
+            }
+        }
+    }
+
+    unsafe fn erase_to_end_of_line(cols: usize) {
+        for col in TEXT_COL..cols {
+            TERM_BYTES[TEXT_ROW][col] = 0;
+            draw_terminal_cell(col, TEXT_ROW, b' ');
+        }
+        TERM_LENS[TEXT_ROW] = TERM_LENS[TEXT_ROW].min(TEXT_COL);
     }
 
     unsafe fn redraw_terminal(rows: usize, cols: usize) {
@@ -216,5 +301,24 @@ pub mod gui {
         if byte != b' ' {
             draw_char(x, y, byte, TERM_FG);
         }
+    }
+
+    unsafe fn hide_cursor() {
+        if TEXT_ROW >= TERM_MAX_ROWS || TEXT_COL >= TERM_MAX_COLS {
+            return;
+        }
+        draw_terminal_cell(TEXT_COL, TEXT_ROW, TERM_BYTES[TEXT_ROW][TEXT_COL]);
+    }
+
+    unsafe fn show_cursor() {
+        let Some((cols, rows)) = terminal_grid() else {
+            return;
+        };
+        if TEXT_COL >= cols || TEXT_ROW >= rows {
+            return;
+        }
+        let x = TEXT_COL * font::ADVANCE;
+        let y = TEXT_ROW * TERM_LINE_H + font::HEIGHT;
+        rect(x, y, font::WIDTH, 2, TERM_FG);
     }
 }

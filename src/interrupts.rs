@@ -536,17 +536,7 @@ extern "C" fn rust_timer_interrupt(frame: *mut scheduler::TrapFrame) {
 extern "C" fn rust_keyboard_interrupt() {
     let scancode = unsafe { arch::inb(0x60) };
     if let Some(byte) = keyboard::decode_scancode(scancode) {
-        if let Some(wake) = scheduler::wake_stdin_waiter() {
-            linux_abi::echo_stdin_key(byte);
-            unsafe {
-                let current_pml4 = arch::read_cr3();
-                arch::load_cr3(wake.pml4_phys);
-                *(wake.buffer as *mut u8) = byte;
-                arch::load_cr3(current_pml4);
-            }
-        } else {
-            keyboard::push_key(byte);
-        }
+        linux_abi::handle_stdin_key(byte);
     }
     unsafe {
         send_eoi(1);
