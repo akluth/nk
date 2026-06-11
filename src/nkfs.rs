@@ -1,6 +1,6 @@
 use core::ptr;
 
-use crate::{ata, serial};
+use crate::{ata, serial, services};
 
 const MAGIC: &[u8; 8] = b"NKFSv1\0\0";
 const VERSION: u32 = 1;
@@ -77,6 +77,58 @@ pub fn read_file(path: &[u8]) -> Option<&'static [u8]> {
 
 pub fn preload_file(path: &[u8]) -> bool {
     read_file(path).is_some()
+}
+
+pub fn write_file_to_console(path: &[u8]) -> bool {
+    let Some(data) = read_file(path) else {
+        write_console(b"cat: not found\n");
+        return false;
+    };
+    write_console(data);
+    if !data.ends_with(b"\n") {
+        write_console(b"\n");
+    }
+    true
+}
+
+pub fn write_dir_to_console(path: &[u8]) -> bool {
+    let Some(data) = read_dir(path) else {
+        write_console(b"ls: not a directory or not found\n");
+        return false;
+    };
+    let mut offset = 0usize;
+    let mut col = 0usize;
+    while offset + 8 <= data.len() {
+        let name_len = read_u16(data, offset + 4).unwrap_or(0) as usize;
+        let next = align_up(offset + 8 + name_len, 4);
+        if next > data.len() {
+            break;
+        }
+        let name = &data[offset + 8..offset + 8 + name_len];
+        if name != b"." && name != b".." {
+            write_console(name);
+            col += name.len();
+            if col >= 64 {
+                write_console(b"\n");
+                col = 0;
+            } else {
+                write_console(b"  ");
+                col += 2;
+            }
+        }
+        offset = next;
+    }
+    if col != 0 {
+        write_console(b"\n");
+    }
+    true
+}
+
+fn write_console(bytes: &[u8]) {
+    for byte in bytes {
+        serial::write_str_byte(*byte);
+    }
+    services::gui::console_write(bytes);
 }
 
 pub fn read_dir(path: &[u8]) -> Option<&'static [u8]> {

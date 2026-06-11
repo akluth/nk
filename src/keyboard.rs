@@ -28,6 +28,15 @@ impl KeyboardBuffer {
         self.read = (self.read + 1) % BUFFER_LEN;
         Some(byte)
     }
+
+    fn push(&mut self, byte: u8) {
+        let next = (self.write + 1) % BUFFER_LEN;
+        if next == self.read {
+            return;
+        }
+        self.bytes[self.write] = byte;
+        self.write = next;
+    }
 }
 
 struct GlobalKeyboard(UnsafeCell<KeyboardBuffer>);
@@ -56,6 +65,12 @@ pub fn decode_scancode(scancode: u8) -> Option<u8> {
 
 pub fn pop_key() -> Option<u8> {
     unsafe { (*KEYBOARD.0.get()).pop() }
+}
+
+pub fn push_key(byte: u8) {
+    unsafe {
+        (*KEYBOARD.0.get()).push(byte);
+    }
 }
 
 fn decode(scancode: u8, shift: bool) -> Option<u8> {

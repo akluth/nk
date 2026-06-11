@@ -217,9 +217,13 @@ pub fn install_page_table_roots(roots: [Option<PageTableRoot>; scheduler::USER_T
 }
 
 pub fn install_first_task() {
-    if !install_user_elf(0, "bash", UserAbi::Linux) {
-        serial::write_line("nk: bash elf missing; no terminal process installed");
+    if !install_user_elf(0, "nsh", UserAbi::Native) {
+        serial::write_line("nk: nsh elf missing; falling back to bash");
+        if !install_user_elf(0, "bash", UserAbi::Linux) {
+            serial::write_line("nk: bash elf missing; no terminal process installed");
+        }
     }
+    serial::write_line("nk: bash available as /bin/bash for optional exec");
     serial::write_line("nk: gui available as /bin/gui for optional exec");
     serial::write_line("nk: taskviewer available as /bin/taskview for optional exec");
     serial::write_line("nk: coreutils available in /bin for on-demand exec");
@@ -234,7 +238,15 @@ pub fn task_pml4(index: usize) -> Option<u64> {
 }
 
 fn install_user_elf(index: usize, name: &'static str, abi: UserAbi) -> bool {
-    let path = b"/bin/bash";
+    let mut path = [0u8; 64];
+    let prefix = b"/bin/";
+    path[..prefix.len()].copy_from_slice(prefix);
+    let name_bytes = name.as_bytes();
+    if prefix.len() + name_bytes.len() > path.len() {
+        return false;
+    }
+    path[prefix.len()..prefix.len() + name_bytes.len()].copy_from_slice(name_bytes);
+    let path = &path[..prefix.len() + name_bytes.len()];
     if let Some(image) = crate::nkfs::read_file(path) {
         if !memory::clear_user_image(index) {
             return false;

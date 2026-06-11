@@ -591,7 +591,10 @@ extern "C" fn rust_timer_interrupt(frame: *mut scheduler::TrapFrame) {
 extern "C" fn rust_keyboard_interrupt() {
     let scancode = unsafe { arch::inb(0x60) };
     if let Some(byte) = keyboard::decode_scancode(scancode) {
-        linux_abi::handle_stdin_key(byte);
+        keyboard::push_key(byte);
+        if matches!(scheduler::current_user_abi(), Some(UserAbi::Linux)) {
+            linux_abi::handle_stdin_key(byte);
+        }
     }
     unsafe {
         send_eoi(1);
@@ -709,6 +712,35 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
             frame.rax = services::gui::console_byte(frame.rdi as usize) as u64;
             return;
         }
+        40 => {
+            native_console_write(frame.rdi as *const u8, frame.rsi as usize);
+            frame.rax = 0;
+            return;
+        }
+        41 => {
+            frame.rax = if native_list_dir(frame.rdi as *const u8, frame.rsi as usize) {
+                0
+            } else {
+                1
+            };
+            return;
+        }
+        42 => {
+            frame.rax = if native_cat_file(frame.rdi as *const u8, frame.rsi as usize) {
+                0
+            } else {
+                1
+            };
+            return;
+        }
+        43 => {
+            frame.rax = if native_is_dir(frame.rdi as *const u8, frame.rsi as usize) {
+                0
+            } else {
+                1
+            };
+            return;
+        }
         32 => unsafe {
             serial::write_line("nk: shutdown requested");
             arch::outw(0x604, 0x2000);
@@ -737,6 +769,53 @@ fn packed_task_info(index: usize) -> u64 {
     }
 
     name_id | (flags << 8) | ((info.ticks & 0x0000_ffff_ffff) << 16)
+}
+
+fn native_console_write(ptr: *const u8, len: usize) {
+    if ptr.is_null() || len > 4096 {
+        return;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+    for byte in bytes {
+        serial::write_str_byte(*byte);
+    }
+    services::gui::console_write(bytes);
+}
+
+fn native_path<'a>(ptr: *const u8, len: usize, out: &'a mut [u8; 256]) -> Option<&'a [u8]> {
+    if ptr.is_null() || len == 0 || len > out.len() {
+        return None;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(ptr, out.as_mut_ptr(), len);
+    }
+    Some(&out[..len])
+}
+
+fn native_list_dir(ptr: *const u8, len: usize) -> bool {
+    let mut path = [0u8; 256];
+    let Some(path) = native_path(ptr, len, &mut path) else {
+        return false;
+    };
+    crate::nkfs::write_dir_to_console(path)
+}
+
+fn native_cat_file(ptr: *const u8, len: usize) -> bool {
+    let mut path = [0u8; 256];
+    let Some(path) = native_path(ptr, len, &mut path) else {
+        return false;
+    };
+    crate::nkfs::write_file_to_console(path)
+}
+
+fn native_is_dir(ptr: *const u8, len: usize) -> bool {
+    let mut path = [0u8; 256];
+    let Some(path) = native_path(ptr, len, &mut path) else {
+        return false;
+    };
+    crate::nkfs::metadata(path)
+        .map(|metadata| metadata.kind == 2)
+        .unwrap_or(false)
 }
 
 #[no_mangle]

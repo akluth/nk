@@ -130,11 +130,13 @@ New-Item -ItemType Directory -Force -Path (Join-Path $IsoRoot "boot") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $IsoRoot "EFI\BOOT") | Out-Null
 Build-UserProgram "gui"
 Build-UserProgram "taskview"
+Build-UserProgram "nsh"
 Ensure-Coreutils
 Ensure-BashProgram
 
 $GuiElf = Join-Path $Build "user\gui.elf"
 $TaskviewElf = Join-Path $Build "user\taskview.elf"
+$NshElf = Join-Path $Build "user\nsh.elf"
 $BashElf = Join-Path $Build "user\bash.elf"
 $HelloTxt = Join-Path $Root "apps\HELLO.TXT"
 $AppFiles = @(
@@ -142,6 +144,7 @@ $AppFiles = @(
     "$GuiElf=/GUI.elf",
     "$TaskviewElf=/bin/taskview",
     "$TaskviewElf=/bin/taskviewer",
+    "$NshElf=/bin/nsh",
     "$BashElf=/bin/bash",
     "$HelloTxt=/hello.txt",
     "$HelloTxt=/HELLO.TXT"
