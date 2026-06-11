@@ -65,6 +65,7 @@ const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 const ENOSYS: i64 = -38;
 const EAGAIN: i64 = -11;
+const EMFILE: i64 = -24;
 
 const CHILD_SLOT: usize = 3;
 const CHILD_PID: u64 = (CHILD_SLOT + 1) as u64;
@@ -73,6 +74,7 @@ const USER_MMAP_END: u64 = 0x0000_0000_411f_0000;
 const USER_BRK_START: u64 = 0x0000_0000_411f_0000;
 const USER_BRK_END: u64 = 0x0000_0000_411f_f000;
 
+#[derive(Clone, Copy)]
 struct OpenFile {
     data: Option<&'static [u8]>,
     offset: usize,
@@ -95,13 +97,17 @@ impl OpenFile {
     }
 }
 
-struct GlobalOpenFile(UnsafeCell<OpenFile>);
+struct GlobalOpenFiles(UnsafeCell<[OpenFile; MAX_OPEN_FILES]>);
 
-unsafe impl Sync for GlobalOpenFile {}
+unsafe impl Sync for GlobalOpenFiles {}
 
-static FILE3: GlobalOpenFile = GlobalOpenFile(UnsafeCell::new(OpenFile::empty()));
-const FD3_BUFFER_CAP: usize = 256 * 1024;
-static mut FD3_BUFFER: [u8; FD3_BUFFER_CAP] = [0; FD3_BUFFER_CAP];
+const FIRST_USER_FD: i32 = 3;
+const MAX_OPEN_FILES: usize = 16;
+const FD_BUFFER_CAP: usize = 256 * 1024;
+static OPEN_FILES: GlobalOpenFiles =
+    GlobalOpenFiles(UnsafeCell::new([OpenFile::empty(); MAX_OPEN_FILES]));
+static mut FD_BUFFERS: [[u8; FD_BUFFER_CAP]; MAX_OPEN_FILES] =
+    [[0; FD_BUFFER_CAP]; MAX_OPEN_FILES];
 const INPUT_LINE_CAP: usize = 256;
 const READY_INPUT_CAP: usize = 512;
 static mut INPUT_LINE: [u8; INPUT_LINE_CAP] = [0; INPUT_LINE_CAP];
@@ -381,15 +387,22 @@ fn open_at(dirfd: i32, path: *const u8) -> i64 {
     let Some(data) = data else {
         return ENOENT;
     };
-    if data.len() > FD3_BUFFER_CAP {
+    if data.len() > FD_BUFFER_CAP {
         return EINVAL;
     }
 
     unsafe {
-        FD3_BUFFER[..data.len()].copy_from_slice(data);
-        let file = &mut *FILE3.0.get();
+        let Some((fd, file_index)) = alloc_open_file() else {
+            return EMFILE;
+        };
+        core::ptr::copy_nonoverlapping(
+            data.as_ptr(),
+            core::ptr::addr_of_mut!(FD_BUFFERS).cast::<u8>().add(file_index * FD_BUFFER_CAP),
+            data.len(),
+        );
+        let file = &mut (*OPEN_FILES.0.get())[file_index];
         file.data = Some(core::slice::from_raw_parts(
-            core::ptr::addr_of!(FD3_BUFFER).cast(),
+            core::ptr::addr_of!(FD_BUFFERS).cast::<u8>().add(file_index * FD_BUFFER_CAP),
             data.len(),
         ));
         file.offset = 0;
@@ -397,8 +410,33 @@ fn open_at(dirfd: i32, path: *const u8) -> i64 {
         file.mode = if meta.kind == 2 { 0o040555 } else { 0o100555 };
         file.path[..path_len].copy_from_slice(&resolved[..path_len]);
         file.path_len = path_len;
+        fd as i64
     }
-    3
+}
+
+unsafe fn alloc_open_file() -> Option<(i32, usize)> {
+    let files = &mut *OPEN_FILES.0.get();
+    for index in 0..MAX_OPEN_FILES {
+        if files[index].data.is_none() {
+            return Some((FIRST_USER_FD + index as i32, index));
+        }
+    }
+    None
+}
+
+unsafe fn open_file(fd: i32) -> Option<&'static mut OpenFile> {
+    if fd < FIRST_USER_FD {
+        return None;
+    }
+    let index = (fd - FIRST_USER_FD) as usize;
+    if index >= MAX_OPEN_FILES {
+        return None;
+    }
+    let file = &mut (*OPEN_FILES.0.get())[index];
+    if file.data.is_none() {
+        return None;
+    }
+    Some(file)
 }
 
 fn fork(frame: &scheduler::TrapFrame) -> i64 {
@@ -481,12 +519,14 @@ fn read(frame: &mut scheduler::TrapFrame, fd: i32, buffer: *mut u8, len: usize) 
     if fd == 0 {
         return read_stdin(frame, buffer, len);
     }
-    if fd != 3 {
+    if fd < FIRST_USER_FD {
         return Some(EBADF);
     }
 
     unsafe {
-        let file = &mut *FILE3.0.get();
+        let Some(file) = open_file(fd) else {
+            return Some(EBADF);
+        };
         let Some(data) = file.data else {
             return Some(EBADF);
         };
@@ -643,28 +683,27 @@ fn writev(fd: i32, iov: *const u8, count: usize) -> i64 {
 }
 
 fn close(fd: i32) -> i64 {
-    if fd == 3 {
-        unsafe {
-            let file = &mut *FILE3.0.get();
-            file.data = None;
-            file.offset = 0;
-            file.is_dir = false;
-            file.mode = 0;
-            file.path_len = 0;
-        }
-        0
-    } else {
-        EBADF
+    if fd < FIRST_USER_FD {
+        return EBADF;
     }
+    unsafe {
+        let Some(file) = open_file(fd) else {
+            return EBADF;
+        };
+        *file = OpenFile::empty();
+    }
+    0
 }
 
 fn lseek(fd: i32, offset: i64, whence: i32) -> i64 {
-    if fd != 3 {
+    if fd < FIRST_USER_FD {
         return EBADF;
     }
 
     unsafe {
-        let file = &mut *FILE3.0.get();
+        let Some(file) = open_file(fd) else {
+            return EBADF;
+        };
         let Some(data) = file.data else {
             return EBADF;
         };
@@ -684,7 +723,14 @@ fn lseek(fd: i32, offset: i64, whence: i32) -> i64 {
 }
 
 fn fcntl(fd: i32, command: u64, _arg: u64) -> i64 {
-    if fd != 0 && fd != 1 && fd != 2 && fd != 3 {
+    if fd != 0 && fd != 1 && fd != 2 {
+        unsafe {
+            if open_file(fd).is_none() {
+                return EBADF;
+            }
+        }
+    }
+    if fd < 0 {
         return EBADF;
     }
     match command {
@@ -733,19 +779,21 @@ fn mmap(address: u64, len: u64, _prot: u64, flags: u64, fd: i64) -> i64 {
 }
 
 fn stat_fd(fd: i32, stat_buf: *mut u8) -> i64 {
-    if fd != 0 && fd != 1 && fd != 2 && fd != 3 {
-        return EBADF;
+    if fd == 0 || fd == 1 || fd == 2 {
+        return write_fake_stat(stat_buf);
     }
-    if fd == 3 {
+    if fd >= FIRST_USER_FD {
         unsafe {
-            let file = &mut *FILE3.0.get();
+            let Some(file) = open_file(fd) else {
+                return EBADF;
+            };
             let Some(data) = file.data else {
                 return EBADF;
             };
             return write_stat(stat_buf, file.mode, data.len() as u64);
         }
     }
-    write_fake_stat(stat_buf)
+    EBADF
 }
 
 fn stat_path(path: *const u8, stat_buf: *mut u8) -> i64 {
@@ -756,9 +804,11 @@ fn stat_path_at(dirfd: i32, path: *const u8, stat_buf: *mut u8) -> i64 {
     let mut raw_path = [0u8; 256];
     let raw_len = read_user_cstr(path, &mut raw_path);
     if raw_len == 0 {
-        if dirfd == 3 {
+        if dirfd >= FIRST_USER_FD {
             unsafe {
-                let file = &mut *FILE3.0.get();
+                let Some(file) = open_file(dirfd) else {
+                    return EBADF;
+                };
                 let Some(data) = file.data else {
                     return EBADF;
                 };
@@ -786,9 +836,11 @@ fn statx(dirfd: i32, path: *const u8, statx_buf: *mut u8) -> i64 {
     let mut raw_path = [0u8; 256];
     let raw_len = read_user_cstr(path, &mut raw_path);
     if raw_len == 0 {
-        if dirfd == 3 {
+        if dirfd >= FIRST_USER_FD {
             unsafe {
-                let file = &mut *FILE3.0.get();
+                let Some(file) = open_file(dirfd) else {
+                    return EBADF;
+                };
                 let Some(data) = file.data else {
                     return EBADF;
                 };
@@ -863,8 +915,8 @@ fn normalize_at_path(
         copy_path(input, &mut scratch)?
     } else if executable && !path_contains_slash(input) {
         copy_with_prefix(b"/bin/", input, &mut scratch)?
-    } else if dirfd == 3 {
-        copy_relative_to_fd3(input, &mut scratch)?
+    } else if dirfd >= FIRST_USER_FD {
+        copy_relative_to_fd(dirfd, input, &mut scratch)?
     } else {
         copy_relative_to_cwd(input, &mut scratch)?
     };
@@ -889,9 +941,9 @@ fn copy_with_prefix(prefix: &[u8], input: &[u8], output: &mut [u8; 256]) -> Opti
     Some(len)
 }
 
-fn copy_relative_to_fd3(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
+fn copy_relative_to_fd(fd: i32, input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
     unsafe {
-        let file = &mut *FILE3.0.get();
+        let file = open_file(fd)?;
         if !file.is_dir || file.path_len == 0 {
             return None;
         }
@@ -1023,7 +1075,7 @@ fn ioctl(fd: i32, request: u64, argp: *mut u8) -> i64 {
 }
 
 fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
-    if fd != 3 {
+    if fd < FIRST_USER_FD {
         return EBADF;
     }
     if dirp.is_null() || count == 0 {
@@ -1031,7 +1083,9 @@ fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
     }
 
     unsafe {
-        let file = &mut *FILE3.0.get();
+        let Some(file) = open_file(fd) else {
+            return EBADF;
+        };
         let Some(data) = file.data else {
             return EBADF;
         };

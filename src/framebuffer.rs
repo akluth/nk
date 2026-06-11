@@ -1,4 +1,4 @@
-use core::ptr::write_volatile;
+use core::ptr::{read_volatile, write_volatile};
 
 #[derive(Clone, Copy)]
 pub struct Color(pub u32);
@@ -41,6 +41,25 @@ impl Framebuffer {
                 self.pixel(xx, yy, color);
             }
         }
+    }
+
+    pub fn scroll_up(&mut self, rows: usize, fill: Color) {
+        if rows == 0 || rows >= self.height {
+            self.clear(fill);
+            return;
+        }
+
+        let copy_rows = self.height - rows;
+        unsafe {
+            for y in 0..copy_rows {
+                let dst = self.address.add(y * self.pitch);
+                let src = self.address.add((y + rows) * self.pitch);
+                for byte in 0..self.pitch {
+                    write_volatile(dst.add(byte), read_volatile(src.add(byte)));
+                }
+            }
+        }
+        self.rect(0, copy_rows, self.width, rows, fill);
     }
 
     pub fn pixel(&mut self, x: usize, y: usize, color: Color) {

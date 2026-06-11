@@ -61,13 +61,18 @@ pub mod gui {
     }
 
     pub fn console_write(bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
         unsafe {
+            hide_cursor();
             for byte in bytes {
                 CONSOLE_BYTES[CONSOLE_WRITE % CONSOLE_LEN] = *byte;
                 CONSOLE_WRITE = CONSOLE_WRITE.wrapping_add(1);
-                CONSOLE_SEQ = CONSOLE_SEQ.wrapping_add(1);
                 draw_terminal_byte(*byte);
             }
+            CONSOLE_SEQ = CONSOLE_SEQ.wrapping_add(1);
+            show_cursor();
         }
     }
 
@@ -84,7 +89,9 @@ pub mod gui {
     pub fn kernel_log_byte(byte: u8) {
         unsafe {
             if KERNEL_LOG_VISIBLE {
+                hide_cursor();
                 draw_terminal_byte(byte);
+                show_cursor();
             }
         }
     }
@@ -144,7 +151,6 @@ pub mod gui {
             return;
         }
 
-        hide_cursor();
         match byte {
             b'\r' => {
                 TEXT_COL = 0;
@@ -181,7 +187,6 @@ pub mod gui {
             }
             _ => {}
         }
-        show_cursor();
     }
 
     unsafe fn terminal_grid() -> Option<(usize, usize)> {
@@ -216,7 +221,7 @@ pub mod gui {
         }
         TERM_BYTES[rows - 1] = [0; TERM_MAX_COLS];
         TERM_LENS[rows - 1] = 0;
-        redraw_terminal(rows, cols);
+        with_framebuffer(|fb| fb.scroll_up(TERM_LINE_H, Color(TERM_BG)));
     }
 
     unsafe fn handle_ansi_byte(byte: u8, cols: usize) -> bool {
@@ -290,23 +295,6 @@ pub mod gui {
             draw_terminal_cell(col, TEXT_ROW, b' ');
         }
         TERM_LENS[TEXT_ROW] = TERM_LENS[TEXT_ROW].min(TEXT_COL);
-    }
-
-    unsafe fn redraw_terminal(rows: usize, cols: usize) {
-        clear(TERM_BG);
-        for row in 0..rows {
-            draw_terminal_row(row, cols);
-        }
-    }
-
-    unsafe fn draw_terminal_row(row: usize, cols: usize) {
-        let len = TERM_LENS[row].min(cols);
-        for col in 0..len {
-            let byte = TERM_BYTES[row][col];
-            if byte != 0 {
-                draw_terminal_cell(col, row, byte);
-            }
-        }
     }
 
     unsafe fn draw_terminal_cell(col: usize, row: usize, byte: u8) {
