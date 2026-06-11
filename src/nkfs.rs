@@ -91,12 +91,6 @@ pub fn exists(path: &[u8]) -> bool {
     metadata(path).is_some()
 }
 
-pub fn is_dir(path: &[u8]) -> bool {
-    metadata(path)
-        .map(|meta| meta.kind == KIND_DIR)
-        .unwrap_or(false)
-}
-
 fn mount() -> Option<Superblock> {
     let mut sector = [0; ata::SECTOR_SIZE];
     if !ata::read_sector(0, &mut sector) {

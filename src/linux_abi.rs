@@ -8,6 +8,7 @@ const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
 const SYS_STAT: u64 = 4;
 const SYS_FSTAT: u64 = 5;
+const SYS_POLL: u64 = 7;
 const SYS_MMAP: u64 = 9;
 const SYS_MPROTECT: u64 = 10;
 const SYS_MUNMAP: u64 = 11;
@@ -17,18 +18,21 @@ const SYS_RT_SIGPROCMASK: u64 = 14;
 const SYS_IOCTL: u64 = 16;
 const SYS_WRITEV: u64 = 20;
 const SYS_ACCESS: u64 = 21;
+const SYS_MADVISE: u64 = 28;
 const SYS_FCNTL: u64 = 72;
 const SYS_GETCWD: u64 = 79;
 const SYS_CHDIR: u64 = 80;
 const SYS_GETTIMEOFDAY: u64 = 96;
 const SYS_GETRESUID: u64 = 118;
 const SYS_GETRESGID: u64 = 120;
+const SYS_SIGALTSTACK: u64 = 131;
 const SYS_READLINK: u64 = 89;
 const SYS_GETUID: u64 = 102;
 const SYS_GETGID: u64 = 104;
 const SYS_GETEUID: u64 = 107;
 const SYS_GETEGID: u64 = 108;
 const SYS_GETPPID: u64 = 110;
+const SYS_TKILL: u64 = 200;
 const SYS_ARCH_PRCTL: u64 = 158;
 const SYS_SET_TID_ADDRESS: u64 = 218;
 const SYS_GETDENTS64: u64 = 217;
@@ -47,6 +51,7 @@ const SYS_SET_ROBUST_LIST: u64 = 273;
 const SYS_NEWFSTATAT: u64 = 262;
 const SYS_PRLIMIT64: u64 = 302;
 const SYS_GETRANDOM: u64 = 318;
+const SYS_STATX: u64 = 332;
 const SYS_RSEQ: u64 = 439;
 
 const ARCH_SET_FS: u64 = 0x1002;
@@ -54,7 +59,6 @@ const ARCH_GET_FS: u64 = 0x1003;
 const IA32_FS_BASE: u32 = 0xc000_0100;
 
 const EBADF: i64 = -9;
-const ECHILD: i64 = -10;
 const ENOENT: i64 = -2;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
@@ -73,6 +77,8 @@ struct OpenFile {
     offset: usize,
     is_dir: bool,
     mode: u32,
+    path: [u8; 256],
+    path_len: usize,
 }
 
 impl OpenFile {
@@ -82,6 +88,8 @@ impl OpenFile {
             offset: 0,
             is_dir: false,
             mode: 0,
+            path: [0; 256],
+            path_len: 0,
         }
     }
 }
@@ -120,7 +128,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_OPEN => {
-            frame.rax = open(frame.rdi as *const u8) as u64;
+            frame.rax = open_at(-100, frame.rdi as *const u8) as u64;
             true
         }
         SYS_CLOSE => {
@@ -139,6 +147,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = lseek(frame.rdi as i32, frame.rsi as i64, frame.rdx as i32) as u64;
             true
         }
+        SYS_POLL => {
+            frame.rax = 0;
+            true
+        }
         SYS_MMAP => {
             frame.rax = mmap(frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8 as i64) as u64;
             true
@@ -148,6 +160,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_MPROTECT => {
+            frame.rax = 0;
+            true
+        }
+        SYS_MADVISE => {
             frame.rax = 0;
             true
         }
@@ -168,7 +184,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_FACCESSAT => {
-            frame.rax = access(frame.rsi as *const u8) as u64;
+            frame.rax = access_at(frame.rdi as i32, frame.rsi as *const u8) as u64;
             true
         }
         SYS_FCNTL => {
@@ -211,7 +227,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
                     crate::arch::load_cr3(task_switch.pml4_phys);
                 },
                 scheduler::WaitResult::NoChild => {
-                    frame.rax = ECHILD as u64;
+                    frame.rax = 0;
                 }
             }
             true
@@ -230,6 +246,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
                 frame.rsi as *mut u32,
                 frame.rdx as *mut u32,
             ) as u64;
+            true
+        }
+        SYS_SIGALTSTACK => {
+            frame.rax = 0;
             true
         }
         SYS_CHDIR => {
@@ -254,6 +274,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
         }
         SYS_ARCH_PRCTL => {
             frame.rax = arch_prctl(frame.rdi, frame.rsi) as u64;
+            true
+        }
+        SYS_TKILL => {
+            frame.rax = 0;
             true
         }
         SYS_SET_ROBUST_LIST => {
@@ -292,11 +316,15 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_OPENAT => {
-            frame.rax = open(frame.rsi as *const u8) as u64;
+            frame.rax = open_at(frame.rdi as i32, frame.rsi as *const u8) as u64;
             true
         }
         SYS_NEWFSTATAT => {
-            frame.rax = stat_path(frame.rsi as *const u8, frame.rdx as *mut u8) as u64;
+            frame.rax = stat_path_at(
+                frame.rdi as i32,
+                frame.rsi as *const u8,
+                frame.rdx as *mut u8,
+            ) as u64;
             true
         }
         SYS_PRLIMIT64 => {
@@ -305,6 +333,14 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
         }
         SYS_GETRANDOM => {
             frame.rax = getrandom(frame.rdi as *mut u8, frame.rsi as usize) as u64;
+            true
+        }
+        SYS_STATX => {
+            frame.rax = statx(
+                frame.rdi as i32,
+                frame.rsi as *const u8,
+                frame.r8 as *mut u8,
+            ) as u64;
             true
         }
         SYS_RSEQ => {
@@ -319,7 +355,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
     }
 }
 
-fn open(path: *const u8) -> i64 {
+fn open_at(dirfd: i32, path: *const u8) -> i64 {
     let mut raw_path = [0u8; 256];
     let raw_len = read_user_cstr(path, &mut raw_path);
     if raw_len == 0 {
@@ -327,7 +363,7 @@ fn open(path: *const u8) -> i64 {
     }
 
     let mut resolved = [0u8; 256];
-    let Some(path_len) = resolve_plain_path(&raw_path[..raw_len], &mut resolved) else {
+    let Some(path_len) = resolve_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
         return ENOENT;
     };
 
@@ -349,6 +385,8 @@ fn open(path: *const u8) -> i64 {
         file.offset = 0;
         file.is_dir = meta.kind == 2;
         file.mode = if meta.kind == 2 { 0o040555 } else { 0o100555 };
+        file.path[..path_len].copy_from_slice(&resolved[..path_len]);
+        file.path_len = path_len;
     }
     3
 }
@@ -600,6 +638,7 @@ fn close(fd: i32) -> i64 {
             file.offset = 0;
             file.is_dir = false;
             file.mode = 0;
+            file.path_len = 0;
         }
         0
     } else {
@@ -698,6 +737,10 @@ fn stat_fd(fd: i32, stat_buf: *mut u8) -> i64 {
 }
 
 fn stat_path(path: *const u8, stat_buf: *mut u8) -> i64 {
+    stat_path_at(-100, path, stat_buf)
+}
+
+fn stat_path_at(dirfd: i32, path: *const u8, stat_buf: *mut u8) -> i64 {
     if path_is_root_or_dot(path) {
         return write_stat(stat_buf, 0o040555, 0);
     }
@@ -707,16 +750,55 @@ fn stat_path(path: *const u8, stat_buf: *mut u8) -> i64 {
         return ENOENT;
     }
     let mut resolved = [0u8; 256];
-    let Some(path_len) = resolve_plain_path(&raw_path[..raw_len], &mut resolved) else {
+    let Some(path_len) = resolve_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
         return ENOENT;
     };
-    if nkfs::metadata(&resolved[..path_len]).is_none() {
+    let Some(meta) = nkfs::metadata(&resolved[..path_len]) else {
+        return ENOENT;
+    };
+    let mode = if meta.kind == 2 { 0o040555 } else { 0o100555 };
+    write_stat(stat_buf, mode, meta.size as u64)
+}
+
+fn statx(dirfd: i32, path: *const u8, statx_buf: *mut u8) -> i64 {
+    if path.is_null() || statx_buf.is_null() {
+        return EFAULT;
+    }
+    if path_is_root_or_dot(path) {
+        return write_statx(statx_buf, 0o040555, 0);
+    }
+
+    let mut raw_path = [0u8; 256];
+    let raw_len = read_user_cstr(path, &mut raw_path);
+    if raw_len == 0 {
+        if dirfd == 3 {
+            unsafe {
+                let file = &mut *FILE3.0.get();
+                let Some(data) = file.data else {
+                    return EBADF;
+                };
+                return write_statx(statx_buf, file.mode, data.len() as u64);
+            }
+        }
         return ENOENT;
     }
-    write_stat(stat_buf, path_mode(path), path_size(path))
+
+    let mut resolved = [0u8; 256];
+    let Some(path_len) = resolve_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
+        return ENOENT;
+    };
+    let Some(meta) = nkfs::metadata(&resolved[..path_len]) else {
+        return ENOENT;
+    };
+    let mode = if meta.kind == 2 { 0o040555 } else { 0o100555 };
+    write_statx(statx_buf, mode, meta.size as u64)
 }
 
 fn access(path: *const u8) -> i64 {
+    access_at(-100, path)
+}
+
+fn access_at(dirfd: i32, path: *const u8) -> i64 {
     if path_is_root_or_dot(path) {
         return 0;
     }
@@ -726,65 +808,14 @@ fn access(path: *const u8) -> i64 {
         return ENOENT;
     }
     let mut resolved = [0u8; 256];
-    let path_len = resolve_plain_path(&raw_path[..raw_len], &mut resolved)
-        .or_else(|| resolve_exec_path(&raw_path[..raw_len], &mut resolved));
+    let path_len = resolve_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false)
+        .or_else(|| resolve_at_path(dirfd, &raw_path[..raw_len], &mut resolved, true));
     if let Some(len) = path_len {
         if nkfs::exists(&resolved[..len]) {
             return 0;
         }
     }
     ENOENT
-}
-
-fn path_mode(path: *const u8) -> u32 {
-    if path_is_root_or_dot(path) {
-        return 0o040555;
-    }
-    let mut raw_path = [0u8; 256];
-    let raw_len = read_user_cstr(path, &mut raw_path);
-    if raw_len == 0 {
-        return 0o100444;
-    }
-    let mut resolved = [0u8; 256];
-    let Some(path_len) = resolve_plain_path(&raw_path[..raw_len], &mut resolved)
-        .or_else(|| resolve_exec_path(&raw_path[..raw_len], &mut resolved))
-    else {
-        return 0o100444;
-    };
-    if nkfs::is_dir(&resolved[..path_len]) {
-        0o040555
-    } else {
-        0o100555
-    }
-}
-
-fn path_size(path: *const u8) -> u64 {
-    if path_is_root_or_dot(path) {
-        return 0;
-    }
-    let mut raw_path = [0u8; 256];
-    let raw_len = read_user_cstr(path, &mut raw_path);
-    if raw_len == 0 {
-        return 0;
-    }
-    let mut resolved = [0u8; 256];
-    let Some(path_len) = resolve_plain_path(&raw_path[..raw_len], &mut resolved)
-        .or_else(|| resolve_exec_path(&raw_path[..raw_len], &mut resolved))
-    else {
-        return 0;
-    };
-    nkfs::metadata(&resolved[..path_len])
-        .map(|meta| meta.size as u64)
-        .unwrap_or(0)
-}
-
-fn resolve_plain_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
-    let len = normalize_plain_path(input, output)?;
-    if nkfs::exists(&output[..len]) {
-        Some(len)
-    } else {
-        None
-    }
 }
 
 fn resolve_exec_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
@@ -796,7 +827,26 @@ fn resolve_exec_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
     }
 }
 
-fn normalize_plain_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
+fn resolve_at_path(
+    dirfd: i32,
+    input: &[u8],
+    output: &mut [u8; 256],
+    executable: bool,
+) -> Option<usize> {
+    let len = normalize_at_path(dirfd, input, output, executable)?;
+    if nkfs::exists(&output[..len]) {
+        Some(len)
+    } else {
+        None
+    }
+}
+
+fn normalize_at_path(
+    dirfd: i32,
+    input: &[u8],
+    output: &mut [u8; 256],
+    executable: bool,
+) -> Option<usize> {
     if input.is_empty() {
         return None;
     }
@@ -806,7 +856,16 @@ fn normalize_plain_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
     if input.len() >= 2 && input[0] == b'.' && input[1] == b'/' {
         return copy_with_prefix(b"/", &input[2..], output);
     }
-    copy_with_prefix(b"/", input, output)
+    if dirfd == 3 {
+        if let Some(len) = copy_relative_to_fd3(input, output) {
+            return Some(len);
+        }
+    }
+    if executable {
+        copy_with_prefix(b"/bin/", input, output)
+    } else {
+        copy_with_prefix(b"/", input, output)
+    }
 }
 
 fn normalize_exec_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
@@ -838,6 +897,33 @@ fn copy_with_prefix(prefix: &[u8], input: &[u8], output: &mut [u8; 256]) -> Opti
     output[..prefix.len()].copy_from_slice(prefix);
     output[prefix.len()..len].copy_from_slice(input);
     Some(len)
+}
+
+fn copy_relative_to_fd3(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
+    unsafe {
+        let file = &mut *FILE3.0.get();
+        if !file.is_dir || file.path_len == 0 {
+            return None;
+        }
+        let mut len = file.path_len;
+        if len > output.len() {
+            return None;
+        }
+        output[..len].copy_from_slice(&file.path[..len]);
+        if len > 1 && output[len - 1] != b'/' {
+            if len >= output.len() {
+                return None;
+            }
+            output[len] = b'/';
+            len += 1;
+        }
+        let end = len.checked_add(input.len())?;
+        if end > output.len() {
+            return None;
+        }
+        output[len..end].copy_from_slice(input);
+        Some(end)
+    }
 }
 
 fn basename_bytes(path: &[u8]) -> &[u8] {
@@ -1105,6 +1191,21 @@ fn write_stat(stat_buf: *mut u8, mode_value: u32, size_value: u64) -> i64 {
     0
 }
 
+fn write_statx(statx_buf: *mut u8, mode_value: u32, size_value: u64) -> i64 {
+    unsafe {
+        for index in 0..256 {
+            *statx_buf.add(index) = 0;
+        }
+        write_user_u32(statx_buf, 0x17ff);
+        write_user_u32(statx_buf.add(4), 4096);
+        write_user_u32(statx_buf.add(16), 1);
+        write_user_u16(statx_buf.add(28), mode_value as u16);
+        write_user_u64(statx_buf.add(32), 1);
+        write_user_u64(statx_buf.add(40), size_value);
+    }
+    0
+}
+
 fn uname(buffer: *mut u8) -> i64 {
     if buffer.is_null() {
         return EFAULT;
@@ -1238,6 +1339,12 @@ unsafe fn read_user_u64(ptr: *const u8) -> u64 {
 }
 
 unsafe fn write_user_u16(ptr: *mut u8, value: u16) {
+    for (index, byte) in value.to_le_bytes().iter().enumerate() {
+        *ptr.add(index) = *byte;
+    }
+}
+
+unsafe fn write_user_u32(ptr: *mut u8, value: u32) {
     for (index, byte) in value.to_le_bytes().iter().enumerate() {
         *ptr.add(index) = *byte;
     }

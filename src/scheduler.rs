@@ -1,6 +1,7 @@
 use core::cell::UnsafeCell;
 
 pub const USER_TASKS: usize = 4;
+const IA32_FS_BASE: u32 = 0xc000_0100;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -51,11 +52,13 @@ struct UserTask {
     pml4_phys: u64,
     initial_frame: TrapFrame,
     frame: TrapFrame,
+    fs_base: u64,
     ticks: u64,
     active: bool,
     waiting_stdin: bool,
     stdin_buffer: u64,
     waiting_child: bool,
+    wait_status: u64,
     zombie: bool,
     exit_status: i32,
 }
@@ -91,15 +94,22 @@ impl UserTask {
             pml4_phys: 0,
             initial_frame: Self::EMPTY_FRAME,
             frame: Self::EMPTY_FRAME,
+            fs_base: 0,
             ticks: 0,
             active: false,
             waiting_stdin: false,
             stdin_buffer: 0,
             waiting_child: false,
+            wait_status: 0,
             zombie: false,
             exit_status: 0,
         }
     }
+}
+
+const fn initial_fs_base(frame: TrapFrame) -> u64 {
+    let _ = frame;
+    0
 }
 
 #[derive(Clone, Copy)]
@@ -155,11 +165,13 @@ impl UserScheduler {
             pml4_phys,
             initial_frame: frame,
             frame,
+            fs_base: initial_fs_base(frame),
             ticks: 0,
             active: true,
             waiting_stdin: false,
             stdin_buffer: 0,
             waiting_child: false,
+            wait_status: 0,
             zombie: false,
             exit_status: 0,
         };
@@ -175,10 +187,12 @@ impl UserScheduler {
         self.tasks[index].abi = abi;
         self.tasks[index].initial_frame = frame;
         self.tasks[index].frame = frame;
+        self.tasks[index].fs_base = initial_fs_base(frame);
         self.tasks[index].active = true;
         self.tasks[index].waiting_stdin = false;
         self.tasks[index].stdin_buffer = 0;
         self.tasks[index].waiting_child = false;
+        self.tasks[index].wait_status = 0;
         self.tasks[index].zombie = false;
         self.tasks[index].exit_status = 0;
     }
@@ -189,6 +203,7 @@ impl UserScheduler {
         }
 
         self.tasks[self.current].frame = *frame;
+        self.save_fs_base(self.current);
         self.tasks[self.current].ticks = self.tasks[self.current].ticks.wrapping_add(1);
 
         let Some(next) = self.next_active_from((self.current + 1) % self.installed) else {
@@ -196,6 +211,7 @@ impl UserScheduler {
         };
 
         self.current = next;
+        self.restore_fs_base(self.current);
         *frame = self.tasks[self.current].frame;
         Some(UserSwitch {
             name: self.tasks[self.current].name,
@@ -225,10 +241,12 @@ impl UserScheduler {
         let current = self.current;
         let next = self.next_active_from((current + 1) % self.installed)?;
         self.tasks[current].frame = *frame;
+        self.save_fs_base(current);
         self.tasks[current].active = false;
         self.tasks[current].waiting_stdin = true;
         self.tasks[current].stdin_buffer = buffer;
         self.current = next;
+        self.restore_fs_base(self.current);
         *frame = self.tasks[self.current].frame;
         Some(UserSwitch {
             name: self.tasks[self.current].name,
@@ -244,9 +262,12 @@ impl UserScheduler {
         let current = self.current;
         let next = self.next_active_from((current + 1) % self.installed)?;
         self.tasks[current].frame = *frame;
+        self.save_fs_base(current);
         self.tasks[current].active = false;
         self.tasks[current].waiting_child = true;
+        self.tasks[current].wait_status = frame.rsi;
         self.current = next;
+        self.restore_fs_base(self.current);
         *frame = self.tasks[self.current].frame;
         Some(UserSwitch {
             name: self.tasks[self.current].name,
@@ -269,16 +290,12 @@ impl UserScheduler {
         None
     }
 
-    fn fork_current_to(
-        &mut self,
-        child: usize,
-        child_pml4: u64,
-        frame: &TrapFrame,
-    ) -> Option<u64> {
+    fn fork_current_to(&mut self, child: usize, child_pml4: u64, frame: &TrapFrame) -> Option<u64> {
         if child >= USER_TASKS || self.installed == 0 {
             return None;
         }
 
+        self.save_fs_base(self.current);
         let mut child_task = self.tasks[self.current];
         child_task.name = "child";
         child_task.pml4_phys = child_pml4;
@@ -289,6 +306,7 @@ impl UserScheduler {
         child_task.waiting_stdin = false;
         child_task.stdin_buffer = 0;
         child_task.waiting_child = false;
+        child_task.wait_status = 0;
         child_task.zombie = false;
         child_task.exit_status = 0;
         self.tasks[child] = child_task;
@@ -343,10 +361,12 @@ impl UserScheduler {
         }
 
         let exiting = self.current;
+        self.save_fs_base(exiting);
         self.tasks[exiting].active = false;
         self.tasks[exiting].waiting_stdin = false;
         self.tasks[exiting].stdin_buffer = 0;
         self.tasks[exiting].waiting_child = false;
+        self.tasks[exiting].wait_status = 0;
         self.tasks[exiting].zombie = true;
         self.tasks[exiting].exit_status = 0;
 
@@ -356,6 +376,7 @@ impl UserScheduler {
                 self.tasks[parent].waiting_child = false;
                 self.tasks[parent].active = true;
                 self.tasks[parent].frame.rax = (exiting + 1) as u64;
+                self.write_wait_status(parent, 0);
                 awakened_parent = Some(parent);
                 break;
             }
@@ -364,6 +385,7 @@ impl UserScheduler {
         if let Some(parent) = awakened_parent {
             self.current = parent;
             self.focus = parent;
+            self.restore_fs_base(parent);
             *frame = self.tasks[parent].frame;
             return Some(self.tasks[parent].pml4_phys);
         }
@@ -371,6 +393,7 @@ impl UserScheduler {
         if exiting != 0 && self.installed > 0 && self.tasks[0].active {
             self.current = 0;
             self.focus = 0;
+            self.restore_fs_base(0);
             *frame = self.tasks[0].frame;
             return Some(self.tasks[0].pml4_phys);
         }
@@ -382,8 +405,37 @@ impl UserScheduler {
         let next = self.next_active_from((self.current + 1) % self.installed)?;
         self.current = next;
         self.focus = next;
+        self.restore_fs_base(self.current);
         *frame = self.tasks[self.current].frame;
         Some(self.tasks[self.current].pml4_phys)
+    }
+
+    fn save_fs_base(&mut self, index: usize) {
+        if index < self.installed {
+            self.tasks[index].fs_base = unsafe { crate::arch::rdmsr(IA32_FS_BASE) };
+        }
+    }
+
+    fn restore_fs_base(&self, index: usize) {
+        if index < self.installed {
+            unsafe {
+                crate::arch::wrmsr(IA32_FS_BASE, self.tasks[index].fs_base);
+            }
+        }
+    }
+
+    fn write_wait_status(&mut self, parent: usize, status: i32) {
+        let address = self.tasks[parent].wait_status;
+        if address == 0 {
+            return;
+        }
+        unsafe {
+            let current_cr3 = crate::arch::read_cr3();
+            crate::arch::load_cr3(self.tasks[parent].pml4_phys);
+            *(address as *mut i32) = status;
+            crate::arch::load_cr3(current_cr3);
+        }
+        self.tasks[parent].wait_status = 0;
     }
 
     fn wait_for_child(&mut self, frame: &mut TrapFrame, pid: i32) -> WaitResult {
@@ -399,6 +451,7 @@ impl UserScheduler {
         if self.tasks[child].zombie {
             self.tasks[child].zombie = false;
             self.tasks[child].active = false;
+            self.write_wait_status(self.current, 0);
             return WaitResult::Exited((child + 1) as u64);
         }
 
@@ -421,6 +474,7 @@ impl UserScheduler {
             self.tasks[index].waiting_stdin = false;
             self.tasks[index].stdin_buffer = 0;
             self.tasks[index].waiting_child = false;
+            self.tasks[index].wait_status = 0;
             self.tasks[index].zombie = false;
             self.tasks[index].exit_status = 0;
             self.focus = index;

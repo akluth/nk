@@ -20,6 +20,14 @@ struct LoadSegment {
     file_size: usize,
 }
 
+#[derive(Clone, Copy)]
+struct ElfImage {
+    entry: VirtAddr,
+    phdr: VirtAddr,
+    phent: u64,
+    phnum: u64,
+}
+
 impl LoadSegment {
     const fn empty() -> Self {
         Self {
@@ -231,18 +239,18 @@ fn install_user_elf(index: usize, name: &'static str, abi: UserAbi) -> bool {
         if !memory::clear_user_image(index) {
             return false;
         }
-        if let Some(entry) = load_elf(index, image) {
+        if let Some(elf) = load_elf(index, image) {
             let stack_top = if matches!(abi, UserAbi::Linux) {
                 let args: [&[u8]; 4] = [name.as_bytes(), b"--noprofile", b"--norc", b"-i"];
-                linux_stack_top(index, &args).unwrap_or_else(|| memory::user_stack_top(index))
+                linux_stack_top(index, &args, elf).unwrap_or_else(|| memory::user_stack_top(index))
             } else {
                 memory::user_stack_top(index)
             };
             unsafe {
-                (*USER_ADDRESS_SPACE.0.get()).install_task(entry, stack_top);
+                (*USER_ADDRESS_SPACE.0.get()).install_task(elf.entry, stack_top);
             }
             if let Some(root) = unsafe { (*USER_ADDRESS_SPACE.0.get()).root(index) } {
-                install_task_frame(index, name, abi, root.pml4_phys(), entry, stack_top);
+                install_task_frame(index, name, abi, root.pml4_phys(), elf.entry, stack_top);
                 serial::write_str("nk: ");
                 serial::write_str(name);
                 serial::write_line(" elf process installed");
@@ -280,14 +288,14 @@ pub fn exec_linux_elf(
     if !memory::clear_user_image(index) {
         return false;
     }
-    let Some(entry) = load_elf(index, image) else {
+    let Some(elf) = load_elf(index, image) else {
         return false;
     };
-    let Some(stack_top) = linux_stack_top(index, argv) else {
+    let Some(stack_top) = linux_stack_top(index, argv, elf) else {
         return false;
     };
 
-    let new_frame = new_task_frame(UserAbi::Linux, entry, stack_top);
+    let new_frame = new_task_frame(UserAbi::Linux, elf.entry, stack_top);
     scheduler::replace_user_task_frame(index, task_name, UserAbi::Linux, new_frame);
     *frame = new_frame;
     true
@@ -305,20 +313,24 @@ pub fn exec_native_elf(
     if !memory::clear_user_image(index) {
         return false;
     }
-    let Some(entry) = load_elf(index, image) else {
+    let Some(elf) = load_elf(index, image) else {
         return false;
     };
 
     let stack_top = memory::user_stack_top(index);
-    let new_frame = new_task_frame(UserAbi::Native, entry, stack_top);
+    let new_frame = new_task_frame(UserAbi::Native, elf.entry, stack_top);
     scheduler::replace_user_task_frame(index, task_name, UserAbi::Native, new_frame);
     *frame = new_frame;
     true
 }
 
-fn linux_stack_top(index: usize, argv: &[&[u8]]) -> Option<VirtAddr> {
+fn linux_stack_top(index: usize, argv: &[&[u8]], elf: ElfImage) -> Option<VirtAddr> {
     const AT_NULL: u64 = 0;
+    const AT_PHDR: u64 = 3;
+    const AT_PHENT: u64 = 4;
+    const AT_PHNUM: u64 = 5;
     const AT_PAGESZ: u64 = 6;
+    const AT_ENTRY: u64 = 9;
     const AT_UID: u64 = 11;
     const AT_EUID: u64 = 12;
     const AT_GID: u64 = 13;
@@ -379,7 +391,7 @@ fn linux_stack_top(index: usize, argv: &[&[u8]]) -> Option<VirtAddr> {
         return None;
     }
 
-    let mut words = [0u64; 32];
+    let mut words = [0u64; 64];
     let mut word_count = 0usize;
     words[word_count] = argv.len() as u64;
     word_count += 1;
@@ -396,8 +408,16 @@ fn linux_stack_top(index: usize, argv: &[&[u8]]) -> Option<VirtAddr> {
     words[word_count] = 0;
     word_count += 1;
     let auxv = [
+        AT_PHDR,
+        elf.phdr,
+        AT_PHENT,
+        elf.phent,
+        AT_PHNUM,
+        elf.phnum,
         AT_PAGESZ,
         4096,
+        AT_ENTRY,
+        elf.entry,
         AT_UID,
         0,
         AT_EUID,
@@ -482,7 +502,7 @@ fn new_task_frame(abi: UserAbi, entry: VirtAddr, stack_top: VirtAddr) -> TrapFra
     }
 }
 
-fn load_elf(task_index: usize, image: &[u8]) -> Option<u64> {
+fn load_elf(task_index: usize, image: &[u8]) -> Option<ElfImage> {
     if image.len() < 64 || &image[0..4] != b"\x7fELF" {
         return None;
     }
@@ -514,6 +534,7 @@ fn load_elf(task_index: usize, image: &[u8]) -> Option<u64> {
     let mut load_count = 0usize;
     let mut dynamic_offset = 0usize;
     let mut dynamic_size = 0usize;
+    let mut phdr = 0u64;
     for index in 0..phnum {
         let offset = phoff.checked_add(index.checked_mul(phentsize)?)?;
         if offset.checked_add(phentsize)? > image.len() {
@@ -549,6 +570,8 @@ fn load_elf(task_index: usize, image: &[u8]) -> Option<u64> {
         } else if ph_type == 2 {
             dynamic_offset = file_offset;
             dynamic_size = file_size;
+        } else if ph_type == 6 {
+            phdr = raw_virt.checked_add(load_bias)?;
         }
     }
 
@@ -565,7 +588,16 @@ fn load_elf(task_index: usize, image: &[u8]) -> Option<u64> {
         return None;
     }
 
-    Some(entry)
+    if phdr == 0 {
+        phdr = load_bias.checked_add(phoff as u64)?;
+    }
+
+    Some(ElfImage {
+        entry,
+        phdr,
+        phent: phentsize as u64,
+        phnum: phnum as u64,
+    })
 }
 
 fn apply_relative_relocations(

@@ -161,14 +161,45 @@ isr_general_protection:
     push r15
     sub rsp, 8
     cld
-    mov rdi, 13
-    mov rsi, [rsp + 128]
-    mov rdx, [rsp + 136]
-    xor rcx, rcx
-    call rust_fatal_exception
+    mov rdx, [rsp + 128]
+    mov rcx, [rsp + 136]
+    mov rax, [rsp + 136]
+    mov [rsp + 128], rax
+    mov rax, [rsp + 144]
+    mov [rsp + 136], rax
+    mov rax, [rsp + 152]
+    mov [rsp + 144], rax
+    mov rax, [rsp + 160]
+    mov [rsp + 152], rax
+    mov rax, [rsp + 168]
+    mov [rsp + 160], rax
+    lea rdi, [rsp + 8]
+    mov rsi, 13
+    xor r8, r8
+    call rust_exception
+    test al, al
+    jnz 2f
 1:
     hlt
     jmp 1b
+2:
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
 
     .global isr_page_fault
 isr_page_fault:
@@ -189,14 +220,45 @@ isr_page_fault:
     push r15
     sub rsp, 8
     cld
-    mov rdi, 14
-    mov rsi, [rsp + 128]
-    mov rdx, [rsp + 136]
-    mov rcx, cr2
-    call rust_fatal_exception
+    mov rdx, [rsp + 128]
+    mov rcx, [rsp + 136]
+    mov rax, [rsp + 136]
+    mov [rsp + 128], rax
+    mov rax, [rsp + 144]
+    mov [rsp + 136], rax
+    mov rax, [rsp + 152]
+    mov [rsp + 144], rax
+    mov rax, [rsp + 160]
+    mov [rsp + 152], rax
+    mov rax, [rsp + 168]
+    mov [rsp + 160], rax
+    lea rdi, [rsp + 8]
+    mov rsi, 14
+    mov r8, cr2
+    call rust_exception
+    test al, al
+    jnz 2f
 1:
     hlt
     jmp 1b
+2:
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
 
     .global isr_timer
 isr_timer:
@@ -677,8 +739,14 @@ fn packed_task_info(index: usize) -> u64 {
 }
 
 #[no_mangle]
-extern "C" fn rust_fatal_exception(vector: u64, error: u64, rip: u64, address: u64) -> ! {
-    serial::write_str("nk: fatal exception vector=");
+extern "C" fn rust_exception(
+    frame: *mut scheduler::TrapFrame,
+    vector: u64,
+    error: u64,
+    rip: u64,
+    address: u64,
+) -> bool {
+    serial::write_str("nk: exception vector=");
     serial::write_dec_u8(vector as u8);
     serial::write_str(" error=");
     serial::write_hex_u64(error);
@@ -687,7 +755,17 @@ extern "C" fn rust_fatal_exception(vector: u64, error: u64, rip: u64, address: u
     serial::write_str(" addr=");
     serial::write_hex_u64(address);
     serial::write_line("");
-    loop {
-        arch::halt();
+
+    let frame = unsafe { &mut *frame };
+    if frame.cs & 0x3 == 0x3 {
+        serial::write_line("nk: terminating faulted user task");
+        if let Some(pml4_phys) = scheduler::exit_current_user(frame) {
+            unsafe {
+                arch::load_cr3(pml4_phys);
+            }
+            return true;
+        }
     }
+
+    false
 }
