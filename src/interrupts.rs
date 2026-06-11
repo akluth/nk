@@ -640,6 +640,15 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
 
     match frame.rax {
         0 => {}
+        60 | 231 if frame.cs & 0x3 == 0x3 => {
+            serial::write_line("nk: user task exited via fallback");
+            if let Some(pml4_phys) = scheduler::exit_current_user(frame) {
+                unsafe {
+                    arch::load_cr3(pml4_phys);
+                }
+            }
+            return;
+        }
         16 => services::gui::clear(frame.rdi as u32),
         17 => services::gui::rect(
             frame.rdi as usize,

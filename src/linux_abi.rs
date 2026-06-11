@@ -59,6 +59,7 @@ const ARCH_GET_FS: u64 = 0x1003;
 const IA32_FS_BASE: u32 = 0xc000_0100;
 
 const EBADF: i64 = -9;
+const ECHILD: i64 = -10;
 const ENOENT: i64 = -2;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
@@ -106,6 +107,8 @@ static mut INPUT_LINE_LEN: usize = 0;
 static mut READY_INPUT: [u8; READY_INPUT_CAP] = [0; READY_INPUT_CAP];
 static mut READY_READ: usize = 0;
 static mut READY_WRITE: usize = 0;
+static mut TASK_CWDS: [[u8; 256]; scheduler::USER_TASKS] = [[0; 256]; scheduler::USER_TASKS];
+static mut TASK_CWD_LENS: [usize; scheduler::USER_TASKS] = [0; scheduler::USER_TASKS];
 static mut MMAP_CURSOR: u64 = USER_MMAP_START;
 static mut PROGRAM_BREAK: u64 = USER_BRK_START;
 static mut UNKNOWN_LOGS: u64 = 0;
@@ -227,7 +230,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
                     crate::arch::load_cr3(task_switch.pml4_phys);
                 },
                 scheduler::WaitResult::NoChild => {
-                    frame.rax = 0;
+                    frame.rax = ECHILD as u64;
                 }
             }
             true
@@ -401,7 +404,9 @@ fn fork(frame: &scheduler::TrapFrame) -> i64 {
     let Some(child_pml4) = userland::task_pml4(CHILD_SLOT) else {
         return EINVAL;
     };
-    scheduler::fork_current_user_to(CHILD_SLOT, child_pml4, frame).unwrap_or(CHILD_PID) as i64
+    let pid = scheduler::fork_current_user_to(CHILD_SLOT, child_pml4, frame).unwrap_or(CHILD_PID);
+    copy_cwd(parent, CHILD_SLOT);
+    pid as i64
 }
 
 fn execve(frame: &mut scheduler::TrapFrame, path: *const u8, argv: *const u64) -> i64 {
@@ -741,12 +746,18 @@ fn stat_path(path: *const u8, stat_buf: *mut u8) -> i64 {
 }
 
 fn stat_path_at(dirfd: i32, path: *const u8, stat_buf: *mut u8) -> i64 {
-    if path_is_root_or_dot(path) {
-        return write_stat(stat_buf, 0o040555, 0);
-    }
     let mut raw_path = [0u8; 256];
     let raw_len = read_user_cstr(path, &mut raw_path);
     if raw_len == 0 {
+        if dirfd == 3 {
+            unsafe {
+                let file = &mut *FILE3.0.get();
+                let Some(data) = file.data else {
+                    return EBADF;
+                };
+                return write_stat(stat_buf, file.mode, data.len() as u64);
+            }
+        }
         return ENOENT;
     }
     let mut resolved = [0u8; 256];
@@ -763,9 +774,6 @@ fn stat_path_at(dirfd: i32, path: *const u8, stat_buf: *mut u8) -> i64 {
 fn statx(dirfd: i32, path: *const u8, statx_buf: *mut u8) -> i64 {
     if path.is_null() || statx_buf.is_null() {
         return EFAULT;
-    }
-    if path_is_root_or_dot(path) {
-        return write_statx(statx_buf, 0o040555, 0);
     }
 
     let mut raw_path = [0u8; 256];
@@ -799,9 +807,6 @@ fn access(path: *const u8) -> i64 {
 }
 
 fn access_at(dirfd: i32, path: *const u8) -> i64 {
-    if path_is_root_or_dot(path) {
-        return 0;
-    }
     let mut raw_path = [0u8; 256];
     let raw_len = read_user_cstr(path, &mut raw_path);
     if raw_len == 0 {
@@ -819,12 +824,7 @@ fn access_at(dirfd: i32, path: *const u8) -> i64 {
 }
 
 fn resolve_exec_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
-    let len = normalize_exec_path(input, output)?;
-    if nkfs::exists(&output[..len]) {
-        Some(len)
-    } else {
-        None
-    }
+    resolve_at_path(-100, input, output, true)
 }
 
 fn resolve_at_path(
@@ -850,35 +850,18 @@ fn normalize_at_path(
     if input.is_empty() {
         return None;
     }
-    if input[0] == b'/' {
-        return copy_path(input, output);
-    }
-    if input.len() >= 2 && input[0] == b'.' && input[1] == b'/' {
-        return copy_with_prefix(b"/", &input[2..], output);
-    }
-    if dirfd == 3 {
-        if let Some(len) = copy_relative_to_fd3(input, output) {
-            return Some(len);
-        }
-    }
-    if executable {
-        copy_with_prefix(b"/bin/", input, output)
-    } else {
-        copy_with_prefix(b"/", input, output)
-    }
-}
 
-fn normalize_exec_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
-    if input.is_empty() {
-        return None;
-    }
-    if input[0] == b'/' {
-        return copy_path(input, output);
-    }
-    if input.len() >= 2 && input[0] == b'.' && input[1] == b'/' {
-        return copy_with_prefix(b"/", &input[2..], output);
-    }
-    copy_with_prefix(b"/bin/", input, output)
+    let mut scratch = [0u8; 256];
+    let scratch_len = if input[0] == b'/' {
+        copy_path(input, &mut scratch)?
+    } else if executable && !path_contains_slash(input) {
+        copy_with_prefix(b"/bin/", input, &mut scratch)?
+    } else if dirfd == 3 {
+        copy_relative_to_fd3(input, &mut scratch)?
+    } else {
+        copy_relative_to_cwd(input, &mut scratch)?
+    };
+    canonicalize_path(&scratch[..scratch_len], output)
 }
 
 fn copy_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
@@ -924,6 +907,89 @@ fn copy_relative_to_fd3(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
         output[len..end].copy_from_slice(input);
         Some(end)
     }
+}
+
+fn copy_relative_to_cwd(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
+    let mut cwd = [0u8; 256];
+    let mut len = current_cwd(&mut cwd);
+    if len > output.len() {
+        return None;
+    }
+    output[..len].copy_from_slice(&cwd[..len]);
+    if len > 1 && output[len - 1] != b'/' {
+        if len >= output.len() {
+            return None;
+        }
+        output[len] = b'/';
+        len += 1;
+    }
+    let end = len.checked_add(input.len())?;
+    if end > output.len() {
+        return None;
+    }
+    output[len..end].copy_from_slice(input);
+    Some(end)
+}
+
+fn canonicalize_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
+    if input.is_empty() || input[0] != b'/' {
+        return None;
+    }
+
+    output[0] = b'/';
+    let mut out_len = 1usize;
+    let mut cursor = 1usize;
+    while cursor <= input.len() {
+        while cursor < input.len() && input[cursor] == b'/' {
+            cursor += 1;
+        }
+        let start = cursor;
+        while cursor < input.len() && input[cursor] != b'/' {
+            cursor += 1;
+        }
+        let component = &input[start..cursor];
+        if component.is_empty() || component == b"." {
+            cursor += 1;
+            continue;
+        }
+        if component == b".." {
+            if out_len > 1 {
+                out_len -= 1;
+                while out_len > 1 && output[out_len - 1] != b'/' {
+                    out_len -= 1;
+                }
+                if out_len > 1 && output[out_len - 1] == b'/' {
+                    out_len -= 1;
+                }
+                if out_len == 0 {
+                    out_len = 1;
+                }
+            }
+            cursor += 1;
+            continue;
+        }
+
+        if out_len > 1 {
+            if out_len >= output.len() {
+                return None;
+            }
+            output[out_len] = b'/';
+            out_len += 1;
+        }
+        let end = out_len.checked_add(component.len())?;
+        if end > output.len() {
+            return None;
+        }
+        output[out_len..end].copy_from_slice(component);
+        out_len = end;
+        cursor += 1;
+    }
+
+    Some(out_len)
+}
+
+fn path_contains_slash(path: &[u8]) -> bool {
+    path.iter().any(|byte| *byte == b'/')
 }
 
 fn basename_bytes(path: &[u8]) -> &[u8] {
@@ -1052,12 +1118,14 @@ fn getcwd(buffer: *mut u8, len: usize) -> i64 {
     if buffer.is_null() {
         return EFAULT;
     }
-    if len < 2 {
+    let mut cwd = [0u8; 256];
+    let cwd_len = current_cwd(&mut cwd);
+    if len <= cwd_len {
         return EINVAL;
     }
     unsafe {
-        *buffer = b'/';
-        *buffer.add(1) = 0;
+        core::ptr::copy_nonoverlapping(cwd.as_ptr(), buffer, cwd_len);
+        *buffer.add(cwd_len) = 0;
     }
     buffer as i64
 }
@@ -1116,11 +1184,24 @@ fn readlink(path: *const u8, buffer: *mut u8, len: usize) -> i64 {
 }
 
 fn chdir(path: *const u8) -> i64 {
-    if path_is_root_or_dot(path) {
-        0
-    } else {
-        ENOENT
+    let mut raw_path = [0u8; 256];
+    let raw_len = read_user_cstr(path, &mut raw_path);
+    if raw_len == 0 {
+        return ENOENT;
     }
+
+    let mut resolved = [0u8; 256];
+    let Some(path_len) = normalize_at_path(-100, &raw_path[..raw_len], &mut resolved, false) else {
+        return ENOENT;
+    };
+    let Some(meta) = nkfs::metadata(&resolved[..path_len]) else {
+        return ENOENT;
+    };
+    if meta.kind != 2 {
+        return ENOENT;
+    }
+
+    set_current_cwd(&resolved[..path_len])
 }
 
 fn getrandom(buffer: *mut u8, len: usize) -> i64 {
@@ -1289,19 +1370,6 @@ fn read_user_cstr(path: *const u8, output: &mut [u8]) -> usize {
     len
 }
 
-fn path_is_root_or_dot(path: *const u8) -> bool {
-    if path.is_null() {
-        return false;
-    }
-
-    unsafe {
-        match (*path, *path.add(1), *path.add(2)) {
-            (b'/', 0, _) | (b'.', 0, _) | (b'.', b'/', 0) => true,
-            _ => false,
-        }
-    }
-}
-
 fn path_equals(path: *const u8, value: &[u8]) -> bool {
     if path.is_null() {
         return false;
@@ -1313,6 +1381,50 @@ fn path_equals(path: *const u8, value: &[u8]) -> bool {
             }
         }
         *path.add(value.len()) == 0
+    }
+}
+
+fn current_cwd(output: &mut [u8; 256]) -> usize {
+    unsafe {
+        let index = scheduler::current_user_index().unwrap_or(0);
+        let len = TASK_CWD_LENS[index];
+        if len == 0 {
+            output[0] = b'/';
+            1
+        } else {
+            output[..len].copy_from_slice(&TASK_CWDS[index][..len]);
+            len
+        }
+    }
+}
+
+fn set_current_cwd(path: &[u8]) -> i64 {
+    let Some(index) = scheduler::current_user_index() else {
+        return EINVAL;
+    };
+    if path.is_empty() || path.len() > 256 || path[0] != b'/' {
+        return EINVAL;
+    }
+    unsafe {
+        TASK_CWDS[index][..path.len()].copy_from_slice(path);
+        TASK_CWD_LENS[index] = path.len();
+    }
+    0
+}
+
+fn copy_cwd(parent: usize, child: usize) {
+    if parent >= scheduler::USER_TASKS || child >= scheduler::USER_TASKS {
+        return;
+    }
+    unsafe {
+        let len = TASK_CWD_LENS[parent];
+        if len == 0 {
+            TASK_CWDS[child][0] = b'/';
+            TASK_CWD_LENS[child] = 1;
+        } else {
+            TASK_CWDS[child][..len].copy_from_slice(&TASK_CWDS[parent][..len]);
+            TASK_CWD_LENS[child] = len;
+        }
     }
 }
 
