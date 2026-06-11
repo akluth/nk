@@ -3,7 +3,6 @@
 
 mod arch;
 mod ata;
-mod fat32;
 mod font;
 mod framebuffer;
 mod gdt;
@@ -14,6 +13,7 @@ mod limine;
 mod linux_abi;
 mod memory;
 mod mouse;
+mod nkfs;
 mod pci;
 mod scheduler;
 mod serial;
@@ -31,7 +31,7 @@ pub extern "C" fn _start() -> ! {
 
 mod microkernel {
     use crate::{
-        arch, ata, fat32, gdt, interrupts, ipc, limine, memory, scheduler, serial, services,
+        arch, ata, gdt, interrupts, ipc, limine, memory, nkfs, scheduler, serial, services,
         userland, virtio,
     };
 
@@ -91,7 +91,7 @@ mod microkernel {
             userland::smoke_test_syscall();
             virtio::init();
             ata::smoke_test();
-            fat32::smoke_test();
+            nkfs::smoke_test();
             if can_enter_user {
                 userland::install_first_task();
                 userland::start_first_task();

@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 
-use crate::{arch, fat32, memory, scheduler, serial, services, userland};
+use crate::{arch, memory, nkfs, scheduler, serial, services, userland};
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
@@ -31,6 +31,7 @@ const SYS_GETEGID: u64 = 108;
 const SYS_GETPPID: u64 = 110;
 const SYS_ARCH_PRCTL: u64 = 158;
 const SYS_SET_TID_ADDRESS: u64 = 218;
+const SYS_GETDENTS64: u64 = 217;
 const SYS_BRK: u64 = 12;
 const SYS_GETPID: u64 = 39;
 const SYS_FORK: u64 = 57;
@@ -70,6 +71,8 @@ const USER_BRK_END: u64 = 0x0000_0000_411f_f000;
 struct OpenFile {
     data: Option<&'static [u8]>,
     offset: usize,
+    is_dir: bool,
+    mode: u32,
 }
 
 impl OpenFile {
@@ -77,6 +80,8 @@ impl OpenFile {
         Self {
             data: None,
             offset: 0,
+            is_dir: false,
+            mode: 0,
         }
     }
 }
@@ -259,6 +264,11 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = 4;
             true
         }
+        SYS_GETDENTS64 => {
+            frame.rax =
+                getdents64(frame.rdi as i32, frame.rsi as *mut u8, frame.rdx as usize) as u64;
+            true
+        }
         SYS_EXIT => {
             serial::write_line("nk: linux task exited");
             if let Some(pml4_phys) = scheduler::exit_current_user(frame) {
@@ -310,11 +320,26 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
 }
 
 fn open(path: *const u8) -> i64 {
-    let Some(short_name) = executable_or_plain_fat_name(path) else {
+    let mut raw_path = [0u8; 256];
+    let raw_len = read_user_cstr(path, &mut raw_path);
+    if raw_len == 0 {
+        return ENOENT;
+    }
+
+    let mut resolved = [0u8; 256];
+    let Some(path_len) = resolve_plain_path(&raw_path[..raw_len], &mut resolved) else {
         return ENOENT;
     };
 
-    let Some(data) = fat32::read_file(&short_name) else {
+    let Some(meta) = nkfs::metadata(&resolved[..path_len]) else {
+        return ENOENT;
+    };
+    let data = if meta.kind == 2 {
+        nkfs::read_dir(&resolved[..path_len])
+    } else {
+        nkfs::read_file(&resolved[..path_len])
+    };
+    let Some(data) = data else {
         return ENOENT;
     };
 
@@ -322,6 +347,8 @@ fn open(path: *const u8) -> i64 {
         let file = &mut *FILE3.0.get();
         file.data = Some(data);
         file.offset = 0;
+        file.is_dir = meta.kind == 2;
+        file.mode = if meta.kind == 2 { 0o040555 } else { 0o100555 };
     }
     3
 }
@@ -343,14 +370,15 @@ fn execve(frame: &mut scheduler::TrapFrame, path: *const u8, argv: *const u64) -
     let Some(index) = scheduler::current_user_index() else {
         return EINVAL;
     };
-    let Some(mut fat_name) = path_to_fat_name(path) else {
+    let mut raw_path = [0u8; 256];
+    let raw_len = read_user_cstr(path, &mut raw_path);
+    if raw_len == 0 {
+        return ENOENT;
+    }
+    let mut exec_path = [0u8; 256];
+    let Some(exec_len) = resolve_exec_path(&raw_path[..raw_len], &mut exec_path) else {
         return ENOENT;
     };
-    if fat32::read_file(&fat_name).is_none() && fat_name[8..11] == [b' ', b' ', b' '] {
-        fat_name[8] = b'E';
-        fat_name[9] = b'L';
-        fat_name[10] = b'F';
-    }
 
     let mut arg_storage = [[0u8; 64]; 4];
     let mut arg_lens = [0usize; 4];
@@ -365,11 +393,17 @@ fn execve(frame: &mut scheduler::TrapFrame, path: *const u8, argv: *const u64) -
         args[arg_index] = &arg_storage[arg_index][..arg_lens[arg_index]];
     }
 
-    let native_name = native_exec_name(&fat_name);
+    let native_name = native_exec_name(&exec_path[..exec_len]);
     let exec_ok = if let Some(name) = native_name {
-        userland::exec_native_elf(index, name, &fat_name, frame)
+        userland::exec_native_elf(index, name, &exec_path[..exec_len], frame)
     } else {
-        userland::exec_linux_elf(index, "exec", &fat_name, &args[..arg_count], frame)
+        userland::exec_linux_elf(
+            index,
+            "exec",
+            &exec_path[..exec_len],
+            &args[..arg_count],
+            frame,
+        )
     };
 
     if exec_ok {
@@ -379,10 +413,11 @@ fn execve(frame: &mut scheduler::TrapFrame, path: *const u8, argv: *const u64) -
     }
 }
 
-fn native_exec_name(fat_name: &[u8; 11]) -> Option<&'static str> {
-    if fat_name == b"GUI     ELF" {
+fn native_exec_name(path: &[u8]) -> Option<&'static str> {
+    let name = basename_bytes(path);
+    if name == b"gui" || name == b"GUI.elf" {
         Some("gui")
-    } else if fat_name == b"TASKVIEWELF" {
+    } else if name == b"taskview" || name == b"taskviewer" {
         Some("taskviewer")
     } else {
         None
@@ -405,6 +440,9 @@ fn read(frame: &mut scheduler::TrapFrame, fd: i32, buffer: *mut u8, len: usize) 
         let Some(data) = file.data else {
             return Some(EBADF);
         };
+        if file.is_dir {
+            return Some(EINVAL);
+        }
         if file.offset >= data.len() {
             return Some(0);
         }
@@ -560,6 +598,8 @@ fn close(fd: i32) -> i64 {
             let file = &mut *FILE3.0.get();
             file.data = None;
             file.offset = 0;
+            file.is_dir = false;
+            file.mode = 0;
         }
         0
     } else {
@@ -645,34 +685,169 @@ fn stat_fd(fd: i32, stat_buf: *mut u8) -> i64 {
     if fd != 0 && fd != 1 && fd != 2 && fd != 3 {
         return EBADF;
     }
+    if fd == 3 {
+        unsafe {
+            let file = &mut *FILE3.0.get();
+            let Some(data) = file.data else {
+                return EBADF;
+            };
+            return write_stat(stat_buf, file.mode, data.len() as u64);
+        }
+    }
     write_fake_stat(stat_buf)
 }
 
 fn stat_path(path: *const u8, stat_buf: *mut u8) -> i64 {
     if path_is_root_or_dot(path) {
-        return write_fake_stat(stat_buf);
+        return write_stat(stat_buf, 0o040555, 0);
     }
-    let Some(short_name) = executable_or_plain_fat_name(path) else {
+    let mut raw_path = [0u8; 256];
+    let raw_len = read_user_cstr(path, &mut raw_path);
+    if raw_len == 0 {
+        return ENOENT;
+    }
+    let mut resolved = [0u8; 256];
+    let Some(path_len) = resolve_plain_path(&raw_path[..raw_len], &mut resolved) else {
         return ENOENT;
     };
-    if fat32::read_file(&short_name).is_none() {
+    if nkfs::metadata(&resolved[..path_len]).is_none() {
         return ENOENT;
     }
-    write_fake_stat(stat_buf)
+    write_stat(stat_buf, path_mode(path), path_size(path))
 }
 
 fn access(path: *const u8) -> i64 {
     if path_is_root_or_dot(path) {
         return 0;
     }
-    let Some(short_name) = executable_or_plain_fat_name(path) else {
+    let mut raw_path = [0u8; 256];
+    let raw_len = read_user_cstr(path, &mut raw_path);
+    if raw_len == 0 {
         return ENOENT;
-    };
-    if fat32::read_file(&short_name).is_some() {
-        0
-    } else {
-        ENOENT
     }
+    let mut resolved = [0u8; 256];
+    let path_len = resolve_plain_path(&raw_path[..raw_len], &mut resolved)
+        .or_else(|| resolve_exec_path(&raw_path[..raw_len], &mut resolved));
+    if let Some(len) = path_len {
+        if nkfs::exists(&resolved[..len]) {
+            return 0;
+        }
+    }
+    ENOENT
+}
+
+fn path_mode(path: *const u8) -> u32 {
+    if path_is_root_or_dot(path) {
+        return 0o040555;
+    }
+    let mut raw_path = [0u8; 256];
+    let raw_len = read_user_cstr(path, &mut raw_path);
+    if raw_len == 0 {
+        return 0o100444;
+    }
+    let mut resolved = [0u8; 256];
+    let Some(path_len) = resolve_plain_path(&raw_path[..raw_len], &mut resolved)
+        .or_else(|| resolve_exec_path(&raw_path[..raw_len], &mut resolved))
+    else {
+        return 0o100444;
+    };
+    if nkfs::is_dir(&resolved[..path_len]) {
+        0o040555
+    } else {
+        0o100555
+    }
+}
+
+fn path_size(path: *const u8) -> u64 {
+    if path_is_root_or_dot(path) {
+        return 0;
+    }
+    let mut raw_path = [0u8; 256];
+    let raw_len = read_user_cstr(path, &mut raw_path);
+    if raw_len == 0 {
+        return 0;
+    }
+    let mut resolved = [0u8; 256];
+    let Some(path_len) = resolve_plain_path(&raw_path[..raw_len], &mut resolved)
+        .or_else(|| resolve_exec_path(&raw_path[..raw_len], &mut resolved))
+    else {
+        return 0;
+    };
+    nkfs::metadata(&resolved[..path_len])
+        .map(|meta| meta.size as u64)
+        .unwrap_or(0)
+}
+
+fn resolve_plain_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
+    let len = normalize_plain_path(input, output)?;
+    if nkfs::exists(&output[..len]) {
+        Some(len)
+    } else {
+        None
+    }
+}
+
+fn resolve_exec_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
+    let len = normalize_exec_path(input, output)?;
+    if nkfs::exists(&output[..len]) {
+        Some(len)
+    } else {
+        None
+    }
+}
+
+fn normalize_plain_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
+    if input.is_empty() {
+        return None;
+    }
+    if input[0] == b'/' {
+        return copy_path(input, output);
+    }
+    if input.len() >= 2 && input[0] == b'.' && input[1] == b'/' {
+        return copy_with_prefix(b"/", &input[2..], output);
+    }
+    copy_with_prefix(b"/", input, output)
+}
+
+fn normalize_exec_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
+    if input.is_empty() {
+        return None;
+    }
+    if input[0] == b'/' {
+        return copy_path(input, output);
+    }
+    if input.len() >= 2 && input[0] == b'.' && input[1] == b'/' {
+        return copy_with_prefix(b"/", &input[2..], output);
+    }
+    copy_with_prefix(b"/bin/", input, output)
+}
+
+fn copy_path(input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
+    if input.len() > output.len() {
+        return None;
+    }
+    output[..input.len()].copy_from_slice(input);
+    Some(input.len())
+}
+
+fn copy_with_prefix(prefix: &[u8], input: &[u8], output: &mut [u8; 256]) -> Option<usize> {
+    let len = prefix.len().checked_add(input.len())?;
+    if len > output.len() {
+        return None;
+    }
+    output[..prefix.len()].copy_from_slice(prefix);
+    output[prefix.len()..len].copy_from_slice(input);
+    Some(len)
+}
+
+fn basename_bytes(path: &[u8]) -> &[u8] {
+    let mut start = 0usize;
+    for index in 0..path.len() {
+        if path[index] == b'/' {
+            start = index + 1;
+        }
+    }
+    &path[start..]
 }
 
 fn ioctl(fd: i32, request: u64, argp: *mut u8) -> i64 {
@@ -685,6 +860,58 @@ fn ioctl(fd: i32, request: u64, argp: *mut u8) -> i64 {
         0x5402 | 0x5403 | 0x5404 => 0,
         0x5405 | 0x5406 | 0x5413 => write_winsize(argp),
         _ => 0,
+    }
+}
+
+fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
+    if fd != 3 {
+        return EBADF;
+    }
+    if dirp.is_null() || count == 0 {
+        return EINVAL;
+    }
+
+    unsafe {
+        let file = &mut *FILE3.0.get();
+        let Some(data) = file.data else {
+            return EBADF;
+        };
+        if !file.is_dir {
+            return EINVAL;
+        }
+
+        let mut written = 0usize;
+        while file.offset + 8 <= data.len() {
+            let raw_offset = file.offset;
+            let inode = read_slice_u32(data, raw_offset).unwrap_or(0) as u64;
+            let name_len = read_slice_u16(data, raw_offset + 4).unwrap_or(0) as usize;
+            let kind = read_slice_u16(data, raw_offset + 6).unwrap_or(0);
+            let next = align_up(raw_offset + 8 + name_len, 4);
+            if next > data.len() {
+                break;
+            }
+            let record_len = align_up(19 + name_len + 1, 8);
+            if written + record_len > count {
+                break;
+            }
+            let out = dirp.add(written);
+            write_user_u64(out, inode);
+            write_user_i64(out.add(8), next as i64);
+            write_user_u16(out.add(16), record_len as u16);
+            *out.add(18) = if kind == 2 { 4 } else { 8 };
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr().add(raw_offset + 8),
+                out.add(19),
+                name_len,
+            );
+            *out.add(19 + name_len) = 0;
+            for index in 20 + name_len..record_len {
+                *out.add(index) = 0;
+            }
+            file.offset = next;
+            written += record_len;
+        }
+        written as i64
     }
 }
 
@@ -794,7 +1021,7 @@ fn readlink(path: *const u8, buffer: *mut u8, len: usize) -> i64 {
         return ENOENT;
     }
 
-    let value = b"/bash";
+    let value = b"/bin/bash";
     let count = len.min(value.len());
     unsafe {
         core::ptr::copy_nonoverlapping(value.as_ptr(), buffer, count);
@@ -855,6 +1082,10 @@ fn log_unknown_syscall(id: u64) {
 }
 
 fn write_fake_stat(stat_buf: *mut u8) -> i64 {
+    write_stat(stat_buf, 0o100444, 0)
+}
+
+fn write_stat(stat_buf: *mut u8, mode_value: u32, size_value: u64) -> i64 {
     if stat_buf.is_null() {
         return EFAULT;
     }
@@ -862,9 +1093,13 @@ fn write_fake_stat(stat_buf: *mut u8) -> i64 {
         for index in 0..144 {
             *stat_buf.add(index) = 0;
         }
-        let mode = 0o100444u32.to_le_bytes();
+        let mode = mode_value.to_le_bytes();
         for (index, byte) in mode.iter().enumerate() {
             *stat_buf.add(24 + index) = *byte;
+        }
+        let size = size_value.to_le_bytes();
+        for (index, byte) in size.iter().enumerate() {
+            *stat_buf.add(48 + index) = *byte;
         }
     }
     0
@@ -891,94 +1126,6 @@ fn write_uts_field(buffer: *mut u8, offset: usize, value: &[u8]) {
             *buffer.add(offset + index) = *byte;
         }
     }
-}
-
-fn path_to_fat_name(path: *const u8) -> Option<[u8; 11]> {
-    if path.is_null() {
-        return None;
-    }
-
-    let mut raw = [0u8; 64];
-    let mut len = 0usize;
-    unsafe {
-        while len < raw.len() {
-            let byte = *path.add(len);
-            if byte == 0 {
-                break;
-            }
-            raw[len] = byte;
-            len += 1;
-        }
-    }
-
-    let mut start = 0usize;
-    for index in 0..len {
-        if raw[index] == b'/' {
-            start = index + 1;
-        }
-    }
-
-    let name = &raw[start..len];
-    if name == b"coreutils" {
-        return Some(*b"COREUTILELF");
-    }
-    if name == b"dircolors" {
-        return Some(*b"DIRCLRS ELF");
-    }
-    if name == b"sha224sum" {
-        return Some(*b"SHA224  ELF");
-    }
-    if name == b"sha256sum" {
-        return Some(*b"SHA256  ELF");
-    }
-    if name == b"sha384sum" {
-        return Some(*b"SHA384  ELF");
-    }
-    if name == b"sha512sum" {
-        return Some(*b"SHA512  ELF");
-    }
-
-    let mut out = [b' '; 11];
-    let mut pos = 0usize;
-    let mut ext = 8usize;
-    let mut in_ext = false;
-    for byte in name {
-        if *byte == b'.' {
-            in_ext = true;
-            continue;
-        }
-
-        let upper = if byte.is_ascii_lowercase() {
-            *byte - b'a' + b'A'
-        } else {
-            *byte
-        };
-        if in_ext {
-            if ext >= 11 {
-                return None;
-            }
-            out[ext] = upper;
-            ext += 1;
-        } else {
-            if pos >= 8 {
-                return None;
-            }
-            out[pos] = upper;
-            pos += 1;
-        }
-    }
-
-    Some(out)
-}
-
-fn executable_or_plain_fat_name(path: *const u8) -> Option<[u8; 11]> {
-    let mut fat_name = path_to_fat_name(path)?;
-    if fat32::read_file(&fat_name).is_none() && fat_name[8..11] == [b' ', b' ', b' '] {
-        fat_name[8] = b'E';
-        fat_name[9] = b'L';
-        fat_name[10] = b'F';
-    }
-    Some(fat_name)
 }
 
 fn read_argv(argv: *const u64, storage: &mut [[u8; 64]; 4], lens: &mut [usize; 4]) -> usize {
@@ -1068,12 +1215,38 @@ fn path_equals(path: *const u8, value: &[u8]) -> bool {
     }
 }
 
+const fn align_up(value: usize, align: usize) -> usize {
+    (value + align - 1) & !(align - 1)
+}
+
+fn read_slice_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let data = bytes.get(offset..offset + 2)?;
+    Some(u16::from_le_bytes([data[0], data[1]]))
+}
+
+fn read_slice_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let data = bytes.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+}
+
 unsafe fn read_user_u64(ptr: *const u8) -> u64 {
     let mut bytes = [0u8; 8];
     for (index, byte) in bytes.iter_mut().enumerate() {
         *byte = *ptr.add(index);
     }
     u64::from_le_bytes(bytes)
+}
+
+unsafe fn write_user_u16(ptr: *mut u8, value: u16) {
+    for (index, byte) in value.to_le_bytes().iter().enumerate() {
+        *ptr.add(index) = *byte;
+    }
+}
+
+unsafe fn write_user_u64(ptr: *mut u8, value: u64) {
+    for (index, byte) in value.to_le_bytes().iter().enumerate() {
+        *ptr.add(index) = *byte;
+    }
 }
 
 unsafe fn write_user_i64(ptr: *mut u8, value: i64) {

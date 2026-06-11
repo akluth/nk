@@ -3,7 +3,7 @@
 `nk` is a tiny x86-64 operating system written in Rust. It boots through the
 Limine bootloader on BIOS and UEFI systems, brings up a small microkernel-style
 core, starts Ring 3 tasks, and loads user programs as ELF files from a small
-FAT32 application disk.
+read-only nkfs root filesystem disk.
 
 ## Current Status
 
@@ -12,20 +12,20 @@ FAT32 application disk.
 - Builds a dedicated userland page-table root.
 - Starts Ring 3 tasks through `iretq` and saved trapframes.
 - Uses timer interrupt trapframes as scheduler context.
-- Builds a FAT32 application disk containing `GUI.ELF`, `BASH.ELF`,
-  `TASKVIEW.ELF`, uutils Coreutils command aliases, plus small data files.
-- Reads that FAT32 disk through a first ATA PIO block-device path.
-- Parses userland ELF files from the FAT32 application disk and starts them as
+- Builds a read-only nkfs root disk containing `/bin/bash`, `/bin/gui`,
+  `/bin/taskview`, uutils Coreutils command aliases, plus small data files.
+- Reads that nkfs disk through a first ATA PIO block-device path.
+- Parses userland ELF files from the nkfs root disk and starts them as
   Ring 3 tasks.
 - Provides minimal GUI syscalls for clearing the screen, drawing rectangles,
   and drawing scaled bitmap text.
-- Boots a real static GNU Bash 5.3 `BASH.ELF` as the default user process and
+- Boots a real static GNU Bash 5.3 `/bin/bash` as the default user process and
   renders its terminal output directly through a minimal kernel framebuffer
   console.
-- Keeps the userland GUI compositor and task viewer as optional FAT32-loaded
+- Keeps the userland GUI compositor and task viewer as optional nkfs-loaded
   programs; they are not started automatically during boot.
-- Makes the Rust uutils Coreutils multicall binary available through FAT32
-  aliases such as `CAT.ELF`, `LS.ELF`, `WC.ELF`, and `SHA256SUM.ELF`.
+- Makes the Rust uutils Coreutils multicall binary available through `/bin`
+  aliases such as `/bin/cat`, `/bin/ls`, `/bin/wc`, and `/bin/sha256sum`.
 - Selects Linux/POSIX syscall handling by task ABI, so future Linux-compatible
   user programs are not tied to hard-coded kernel task names.
 - Includes a GNU Bash port under `ports/bash`; the port fetches upstream Bash
@@ -37,8 +37,8 @@ FAT32 application disk.
 - Delivers PS/2 keyboard input through IRQ1 and a small `read_key` syscall.
 - Delivers PS/2 mouse input through IRQ12 and a small `read_mouse` syscall.
 - Bash can start Coreutils commands on demand through the minimal
-  `fork`/`execve`/`wait4` path; `cat hello.txt` reads `HELLO.TXT` from the
-  FAT32 application disk.
+  `fork`/`execve`/`wait4` path; `cat hello.txt` reads `/hello.txt` from the
+  nkfs root disk.
 
 ## Architecture
 
@@ -51,8 +51,8 @@ FAT32 application disk.
   kernel-only framebuffer mapping for syscall handlers.
 - `src/scheduler.rs`: minimal kernel scheduler plus trapframe-based user task
   scheduling.
-- `src/ata.rs`: first ATA PIO sector reader for the QEMU FAT32 application disk.
-- `src/fat32.rs`: tiny FAT32 reader for 8.3 root-directory files.
+- `src/ata.rs`: first ATA PIO sector reader for the QEMU root disk.
+- `src/nkfs.rs`: tiny read-only nkfs reader with UNIX-like absolute paths.
 - `src/userland.rs`: address-space model, ELF loader, task frame setup, CR3
   switch, and Ring 3 entry.
 - `src/services.rs`: kernel-side framebuffer service used by GUI syscalls.
@@ -68,13 +68,14 @@ FAT32 application disk.
 - `src/pci.rs` and `src/virtio.rs`: PCI scan, Virtio capability discovery, and
   early queue memory setup.
 - `user/gui/src/main.rs`: optional separate no_std Rust GUI/compositor
-  executable, startable from Bash as `./gui.elf`.
+  executable, startable from Bash as `gui` or `/bin/gui`.
 - `user/gui/linker.ld`: GUI ELF linker script.
 - `user/taskview/src/main.rs`: separate no_std Rust task viewer executable.
 - `user/taskview/linker.ld`: task viewer ELF linker script.
 - `ports/bash/`: staging notes and fetch script for the real GNU Bash port.
 - `ports/coreutils/`: fetch/build glue for the Rust uutils Coreutils port and
-  the command alias list installed into the FAT32 app disk.
+  the command alias list installed into `/bin` on the nkfs root disk.
+- `scripts/mkfs-nkfs.py`: host-side nkfs image builder.
 
 ## Install Tools
 
@@ -114,12 +115,13 @@ The build script creates both:
 - `build/user/taskview.elf`: optional separate userland task viewer executable.
 - `build/user/coreutils.elf`: the Rust uutils Coreutils multicall executable.
 - `build/user/bash.elf`: GNU Bash executable; the normal build fetches/builds
-  it on demand, copies it to the app disk as `BASH.ELF`, and starts it as the
+  it on demand, copies it to the root disk as `/bin/bash`, and starts it as the
   standard terminal process.
-- `build/nk-apps.fat32`: the FAT32 disk image containing the user programs.
+- `build/nk-root.nkfs`: the read-only nkfs root disk containing `/bin`,
+  `/etc`, `/home/root`, user programs, and small data files.
 
 The ISO only contains the kernel and bootloader files. User programs are loaded
-from the FAT32 application disk at runtime.
+from the nkfs root disk at runtime.
 
 Building Coreutils requires network access on the first build to download the
 official uutils `x86_64-unknown-linux-musl` release asset into ignored
@@ -137,8 +139,8 @@ Windows:
 ```
 
 The BIOS run path uses QEMU's `pc` machine with an IDE disk because the current
-block reader is the intentionally small ATA PIO path. The app disk is attached
-automatically.
+block reader is the intentionally small ATA PIO path. The nkfs root disk is
+attached automatically.
 
 UEFI test with edk2/OVMF from the QEMU installation:
 
@@ -176,7 +178,7 @@ $disk = "$PWD\build\virtio-test.img"
   real process table with multiple children and reaping.
 - Add pipes, descriptor duplication, signals, termios/TTY handling, and
   job-control semantics for Bash and other real Linux/POSIX programs.
-- Load a real PSF/SSFN font from the app disk instead of compiling the generated
+- Load a real PSF/SSFN font from the root disk instead of compiling the generated
   bitmap table into the kernel.
 - Add dirty-rectangle or double-buffered drawing to remove the remaining direct
   framebuffer redraw artifacts.
@@ -185,5 +187,5 @@ $disk = "$PWD\build\virtio-test.img"
   execute unmodified static Linux binaries.
 - Add argv/envp/auxv setup on the initial user stack.
 - Split GUI syscalls into a proper capability-checked IPC protocol.
-- Move the FAT32 block backend from ATA PIO to Virtio block on `q35`.
+- Move the nkfs block backend from ATA PIO to Virtio block on `q35`.
 - Move more kernel-side services behind explicit userland/server boundaries.

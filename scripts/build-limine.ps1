@@ -95,8 +95,8 @@ function Coreutils-AppFiles {
             continue
         }
         $Parts = $Trimmed -split "\s+", 2
-        $Alias = if ($Parts.Count -eq 2) { $Parts[1] } else { "$($Parts[0]).ELF" }
-        $Entries += "$CoreutilsOut=$Alias"
+        $Name = $Parts[0]
+        $Entries += "$CoreutilsOut=/bin/$Name"
     }
     return $Entries
 }
@@ -133,20 +133,26 @@ Build-UserProgram "taskview"
 Ensure-Coreutils
 Ensure-BashProgram
 
+$GuiElf = Join-Path $Build "user\gui.elf"
+$TaskviewElf = Join-Path $Build "user\taskview.elf"
+$BashElf = Join-Path $Build "user\bash.elf"
+$HelloTxt = Join-Path $Root "apps\HELLO.TXT"
 $AppFiles = @(
-    (Join-Path $Build "user\gui.elf"),
-    (Join-Path $Build "user\taskview.elf")
+    "$GuiElf=/bin/gui",
+    "$GuiElf=/GUI.elf",
+    "$TaskviewElf=/bin/taskview",
+    "$TaskviewElf=/bin/taskviewer",
+    "$BashElf=/bin/bash",
+    "$HelloTxt=/hello.txt",
+    "$HelloTxt=/HELLO.TXT"
 )
 $AppFiles += Coreutils-AppFiles
-$BashElf = Join-Path $Build "user\bash.elf"
-$AppFiles += $BashElf
-$AppFiles += (Join-Path $Root "apps\HELLO.TXT")
 
-$MakeFatArgs = @(
-    (Join-Path $Root "scripts\make-fat32.py"),
-    (Join-Path $Build "nk-apps.fat32")
+$MakeNkfsArgs = @(
+    (Join-Path $Root "scripts\mkfs-nkfs.py"),
+    (Join-Path $Build "nk-root.nkfs")
 ) + $AppFiles
-Invoke-Checked python @MakeFatArgs
+Invoke-Checked python @MakeNkfsArgs
 
 Copy-Item (Join-Path $Root "target\x86_64-unknown-none\release\nk") (Join-Path $IsoRoot "boot\nk")
 Copy-Item (Join-Path $Root "limine.conf") (Join-Path $IsoRoot "boot\limine.conf")
@@ -208,7 +214,7 @@ if ($Run) {
         throw "qemu-system-x86_64 wurde nicht gefunden."
     }
 
-    $AppDisk = Join-Path $Build "nk-apps.fat32"
+    $AppDisk = Join-Path $Build "nk-root.nkfs"
     $QemuArgs = @("-M", "pc", "-m", "256M", "-boot", "d", "-cdrom", $Iso, "-drive", "file=$AppDisk,format=raw,if=ide,index=0,media=disk")
     if ($Uefi) {
         $FirmwareCandidates = @(

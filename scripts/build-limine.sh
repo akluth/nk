@@ -211,21 +211,21 @@ ensure_coreutils
 ensure_bash_program
 
 app_files=(
-  "$BUILD/user/gui.elf"
-  "$BUILD/user/taskview.elf"
-  "$BUILD/user/bash.elf"
+  "$BUILD/user/gui.elf=/bin/gui"
+  "$BUILD/user/gui.elf=/GUI.elf"
+  "$BUILD/user/taskview.elf=/bin/taskview"
+  "$BUILD/user/taskview.elf=/bin/taskviewer"
+  "$BUILD/user/bash.elf=/bin/bash"
 )
 while read -r app alias; do
   if [ -z "${app:-}" ] || [[ "$app" = \#* ]]; then
     continue
   fi
-  if [ -z "${alias:-}" ]; then
-    alias="$app.ELF"
-  fi
-  app_files+=("$BUILD/user/coreutils.elf=$alias")
+  app_files+=("$BUILD/user/coreutils.elf=/bin/$app")
 done < "$ROOT/ports/coreutils/coreutils-apps.txt"
-app_files+=("$ROOT/apps/HELLO.TXT")
-python3 "$ROOT/scripts/make-fat32.py" "$BUILD/nk-apps.fat32" "${app_files[@]}"
+app_files+=("$ROOT/apps/HELLO.TXT=/hello.txt")
+app_files+=("$ROOT/apps/HELLO.TXT=/HELLO.TXT")
+python3 "$ROOT/scripts/mkfs-nkfs.py" "$BUILD/nk-root.nkfs" "${app_files[@]}"
 
 cp "$ROOT/target/x86_64-unknown-none/release/nk" "$ISO_ROOT/boot/nk"
 cp "$ROOT/limine.conf" "$ISO_ROOT/boot/limine.conf"
@@ -249,5 +249,5 @@ xorriso -as mkisofs \
 
 if [ "${1:-}" = "run" ]; then
   qemu-system-x86_64 -M pc -m 256M -boot d -cdrom "$BUILD/nk.iso" \
-    -drive "file=$BUILD/nk-apps.fat32,format=raw,if=ide,index=0,media=disk"
+    -drive "file=$BUILD/nk-root.nkfs,format=raw,if=ide,index=0,media=disk"
 fi

@@ -12,13 +12,13 @@ Fetch the source on Windows:
 
 ## Kernel Integration Status
 
-- The kernel starts `BASH.ELF` as the standard second user task beside the GUI.
+- The kernel starts `/bin/bash` as the standard Linux ABI user task.
 - The old Rust terminal fallback has been removed.
 - Bash runs with the Linux/POSIX syscall personality.
 - The syscall dispatcher selects Linux compatibility by task ABI, not by a
   hard-coded program name.
-- The FAT32 image builder automatically includes `build/user/bash.elf` when a
-  Bash port build produces it.
+- The nkfs image builder automatically includes `build/user/bash.elf` at
+  `/bin/bash` when a Bash port build produces it.
 - QEMU serial verification reaches the real GNU Bash prompt:
   `bash-5.3#`.
 
@@ -28,7 +28,8 @@ The Linux compatibility path has basic support for:
 
 - `read`, including blocking keyboard-backed stdin.
 - `write` and `writev` to stdout/stderr.
-- `open`, `openat`, `close`, `fstat`, `newfstatat`, and `lseek` for FAT32 files.
+- `open`, `openat`, `close`, `fstat`, `newfstatat`, and `lseek` for read-only
+  nkfs files.
 - `stat`, `readlink`, `brk`, `mmap`, `munmap`, `uname`, `getcwd`, `chdir`,
   `access`, `fcntl`, `ioctl(TCGETS)`, and `ioctl(TIOCGWINSZ)`.
 - UID/GID/resuid/resgid and parent PID queries.
@@ -81,5 +82,5 @@ The port build produces:
 build/user/bash.elf
 ```
 
-The normal OS image build will then copy it into `build/nk-apps.fat32` as
-`BASH.ELF`; the kernel will start it in slot 1 as the default terminal process.
+The normal OS image build will then copy it into `build/nk-root.nkfs` as
+`/bin/bash`; the kernel will start it as the default terminal process.

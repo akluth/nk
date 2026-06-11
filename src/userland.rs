@@ -209,20 +209,25 @@ pub fn install_page_table_roots(roots: [Option<PageTableRoot>; scheduler::USER_T
 }
 
 pub fn install_first_task() {
-    if !install_user_elf(0, "bash", UserAbi::Linux, b"BASH    ELF") {
+    if !install_user_elf(0, "bash", UserAbi::Linux) {
         serial::write_line("nk: bash elf missing; no terminal process installed");
     }
-    serial::write_line("nk: gui elf available on fat32 for optional exec");
-    serial::write_line("nk: taskviewer elf available on fat32 for optional exec");
-    serial::write_line("nk: coreutils elfs available on fat32 for on-demand exec");
+    serial::write_line("nk: gui available as /bin/gui for optional exec");
+    serial::write_line("nk: taskviewer available as /bin/taskview for optional exec");
+    serial::write_line("nk: coreutils available in /bin for on-demand exec");
 }
 
 pub fn task_pml4(index: usize) -> Option<u64> {
-    unsafe { (*USER_ADDRESS_SPACE.0.get()).root(index).map(|root| root.pml4_phys()) }
+    unsafe {
+        (*USER_ADDRESS_SPACE.0.get())
+            .root(index)
+            .map(|root| root.pml4_phys())
+    }
 }
 
-fn install_user_elf(index: usize, name: &'static str, abi: UserAbi, fat_name: &[u8; 11]) -> bool {
-    if let Some(image) = crate::fat32::read_file(fat_name) {
+fn install_user_elf(index: usize, name: &'static str, abi: UserAbi) -> bool {
+    let path = b"/bin/bash";
+    if let Some(image) = crate::nkfs::read_file(path) {
         if !memory::clear_user_image(index) {
             return false;
         }
@@ -257,7 +262,7 @@ fn install_user_elf(index: usize, name: &'static str, abi: UserAbi, fat_name: &[
     } else {
         serial::write_str("nk: ");
         serial::write_str(name);
-        serial::write_line(" elf missing on fat32");
+        serial::write_line(" elf missing on nkfs");
         false
     }
 }
@@ -265,11 +270,11 @@ fn install_user_elf(index: usize, name: &'static str, abi: UserAbi, fat_name: &[
 pub fn exec_linux_elf(
     index: usize,
     task_name: &'static str,
-    fat_name: &[u8; 11],
+    path: &[u8],
     argv: &[&[u8]],
     frame: &mut TrapFrame,
 ) -> bool {
-    let Some(image) = crate::fat32::read_file(fat_name) else {
+    let Some(image) = crate::nkfs::read_file(path) else {
         return false;
     };
     if !memory::clear_user_image(index) {
@@ -291,10 +296,10 @@ pub fn exec_linux_elf(
 pub fn exec_native_elf(
     index: usize,
     task_name: &'static str,
-    fat_name: &[u8; 11],
+    path: &[u8],
     frame: &mut TrapFrame,
 ) -> bool {
-    let Some(image) = crate::fat32::read_file(fat_name) else {
+    let Some(image) = crate::nkfs::read_file(path) else {
         return false;
     };
     if !memory::clear_user_image(index) {
@@ -323,7 +328,7 @@ fn linux_stack_top(index: usize, argv: &[&[u8]]) -> Option<VirtAddr> {
     let stack_base = memory::user_stack_top(index) - memory::USER_STACK_SIZE as u64;
     let env = [
         b"TERM=linux".as_slice(),
-        b"PATH=/".as_slice(),
+        b"PATH=/bin".as_slice(),
         b"HOME=/root".as_slice(),
         b"USER=root".as_slice(),
         b"LOGNAME=root".as_slice(),
@@ -537,12 +542,8 @@ fn load_elf(task_index: usize, image: &[u8]) -> Option<u64> {
             load_count += 1;
 
             let virt = raw_virt.checked_add(load_bias)?;
-            if !memory::copy_user_segment(
-                task_index,
-                virt,
-                &image[file_offset..file_end],
-                mem_size,
-            ) {
+            if !memory::copy_user_segment(task_index, virt, &image[file_offset..file_end], mem_size)
+            {
                 return None;
             }
         } else if ph_type == 2 {
