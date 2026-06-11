@@ -116,8 +116,8 @@ static OPEN_FILES: GlobalOpenFiles =
     GlobalOpenFiles(UnsafeCell::new([OpenFile::empty(); MAX_OPEN_FILES]));
 static mut FD_BUFFERS: [[u8; FD_BUFFER_CAP]; MAX_OPEN_FILES] =
     [[0; FD_BUFFER_CAP]; MAX_OPEN_FILES];
-const INPUT_LINE_CAP: usize = 256;
-const READY_INPUT_CAP: usize = 512;
+const INPUT_LINE_CAP: usize = 1024;
+const READY_INPUT_CAP: usize = 2048;
 static mut INPUT_LINE: [u8; INPUT_LINE_CAP] = [0; INPUT_LINE_CAP];
 static mut INPUT_LINE_LEN: usize = 0;
 static mut READY_INPUT: [u8; READY_INPUT_CAP] = [0; READY_INPUT_CAP];
@@ -668,7 +668,11 @@ fn write(fd: i32, buffer: *const u8, len: usize) -> i64 {
     let mut written = 0usize;
     while written < len {
         let count = (len - written).min(4096);
-        let bytes = unsafe { core::slice::from_raw_parts(buffer.add(written), count) };
+        let chunk = unsafe { buffer.add(written) };
+        if !user_buffer_readable(chunk as u64, count) {
+            return if written > 0 { written as i64 } else { EFAULT };
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(chunk, count) };
         for byte in bytes {
             serial::write_str_byte(*byte);
         }
@@ -684,6 +688,12 @@ fn writev(fd: i32, iov: *const u8, count: usize) -> i64 {
     }
     if count > 16 {
         return EINVAL;
+    }
+    let Some(iov_len) = count.checked_mul(16) else {
+        return EINVAL;
+    };
+    if !user_buffer_readable(iov as u64, iov_len) {
+        return EFAULT;
     }
 
     let mut total = 0i64;
@@ -1519,6 +1529,20 @@ fn read_slice_u16(bytes: &[u8], offset: usize) -> Option<u16> {
 fn read_slice_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     let data = bytes.get(offset..offset + 4)?;
     Some(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+}
+
+fn user_buffer_readable(address: u64, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let Some(end) = address.checked_add(len as u64) else {
+        return false;
+    };
+    let image_start = memory::USER_IMAGE_BASE;
+    let image_end = image_start + memory::USER_IMAGE_SIZE as u64;
+    let stack_start = memory::USER_STACK_BASE;
+    let stack_end = stack_start + memory::USER_STACK_SIZE as u64;
+    (address >= image_start && end <= image_end) || (address >= stack_start && end <= stack_end)
 }
 
 unsafe fn read_user_u64(ptr: *const u8) -> u64 {

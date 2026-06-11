@@ -24,6 +24,7 @@ pub mod gui {
     static mut TERM_BYTES: [[u8; TERM_MAX_COLS]; TERM_MAX_ROWS] =
         [[0; TERM_MAX_COLS]; TERM_MAX_ROWS];
     static mut TERM_LENS: [usize; TERM_MAX_ROWS] = [0; TERM_MAX_ROWS];
+    static mut TERM_DIRTY: [bool; TERM_MAX_ROWS] = [false; TERM_MAX_ROWS];
     static mut TEXT_COL: usize = 0;
     static mut TEXT_ROW: usize = 0;
     static mut ANSI_STATE: u8 = 0;
@@ -71,6 +72,7 @@ pub mod gui {
                 CONSOLE_WRITE = CONSOLE_WRITE.wrapping_add(1);
                 draw_terminal_byte(*byte);
             }
+            flush_dirty_terminal();
             CONSOLE_SEQ = CONSOLE_SEQ.wrapping_add(1);
             show_cursor();
         }
@@ -91,6 +93,7 @@ pub mod gui {
             if KERNEL_LOG_VISIBLE {
                 hide_cursor();
                 draw_terminal_byte(byte);
+                flush_dirty_terminal();
                 show_cursor();
             }
         }
@@ -168,7 +171,7 @@ pub mod gui {
                     TEXT_COL -= 1;
                     TERM_BYTES[TEXT_ROW][TEXT_COL] = 0;
                     TERM_LENS[TEXT_ROW] = TEXT_COL;
-                    draw_terminal_cell(TEXT_COL, TEXT_ROW, b' ');
+                    mark_dirty(TEXT_ROW);
                 }
             }
             byte if byte >= 0x20 => {
@@ -182,7 +185,7 @@ pub mod gui {
                 }
                 TERM_BYTES[TEXT_ROW][TEXT_COL] = byte;
                 TERM_LENS[TEXT_ROW] = TERM_LENS[TEXT_ROW].max(TEXT_COL + 1);
-                draw_terminal_cell(TEXT_COL, TEXT_ROW, byte);
+                mark_dirty(TEXT_ROW);
                 TEXT_COL += 1;
             }
             _ => {}
@@ -200,6 +203,7 @@ pub mod gui {
     unsafe fn reset_terminal_state() {
         TERM_BYTES = [[0; TERM_MAX_COLS]; TERM_MAX_ROWS];
         TERM_LENS = [0; TERM_MAX_ROWS];
+        TERM_DIRTY = [true; TERM_MAX_ROWS];
         TEXT_COL = 0;
         TEXT_ROW = 0;
         ANSI_STATE = 0;
@@ -222,6 +226,7 @@ pub mod gui {
         TERM_BYTES[rows - 1] = [0; TERM_MAX_COLS];
         TERM_LENS[rows - 1] = 0;
         with_framebuffer(|fb| fb.scroll_up(TERM_LINE_H, Color(TERM_BG)));
+        TERM_DIRTY[rows - 1] = true;
     }
 
     unsafe fn handle_ansi_byte(byte: u8, cols: usize) -> bool {
@@ -292,9 +297,39 @@ pub mod gui {
     unsafe fn erase_to_end_of_line(cols: usize) {
         for col in TEXT_COL..cols {
             TERM_BYTES[TEXT_ROW][col] = 0;
-            draw_terminal_cell(col, TEXT_ROW, b' ');
         }
         TERM_LENS[TEXT_ROW] = TERM_LENS[TEXT_ROW].min(TEXT_COL);
+        mark_dirty(TEXT_ROW);
+    }
+
+    unsafe fn mark_dirty(row: usize) {
+        if row < TERM_MAX_ROWS {
+            TERM_DIRTY[row] = true;
+        }
+    }
+
+    unsafe fn flush_dirty_terminal() {
+        let Some((cols, rows)) = terminal_grid() else {
+            return;
+        };
+        for row in 0..rows {
+            if TERM_DIRTY[row] {
+                draw_terminal_row(row, cols);
+                TERM_DIRTY[row] = false;
+            }
+        }
+    }
+
+    unsafe fn draw_terminal_row(row: usize, cols: usize) {
+        let y = row * TERM_LINE_H;
+        rect(0, y, cols * font::ADVANCE, TERM_LINE_H, TERM_BG);
+        let len = TERM_LENS[row].min(cols);
+        for col in 0..len {
+            let byte = TERM_BYTES[row][col];
+            if byte >= 0x20 && byte != b' ' {
+                draw_char(col * font::ADVANCE, y, byte, TERM_FG);
+            }
+        }
     }
 
     unsafe fn draw_terminal_cell(col: usize, row: usize, byte: u8) {

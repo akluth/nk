@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 
-const BUFFER_LEN: usize = 64;
+const BUFFER_LEN: usize = 256;
 
 struct KeyboardBuffer {
     bytes: [u8; BUFFER_LEN],
@@ -109,7 +109,7 @@ fn decode(scancode: u8, shift: bool) -> Option<u8> {
         0x32 => letter(b'm', shift),
         0x33 => if shift { b';' } else { b',' },
         0x34 => if shift { b':' } else { b'.' },
-        0x35 => if shift { b'_' } else { b'-' },
+        0x35 => if shift { b'?' } else { b'/' },
         _ => return None,
     };
     if byte == 0 {
