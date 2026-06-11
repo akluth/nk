@@ -1,4 +1,4 @@
-use crate::arch;
+use crate::{arch, services};
 
 const COM1: u16 = 0x3f8;
 
@@ -16,9 +16,9 @@ pub fn init() {
 
 pub fn write_line(text: &str) {
     for byte in text.bytes() {
-        write_byte(byte);
+        write_log_byte(byte);
     }
-    write_byte(b'\n');
+    write_log_byte(b'\n');
 }
 
 pub fn write_hex_u16(value: u16) {
@@ -37,17 +37,17 @@ pub fn write_hex_u64(value: u64) {
 
 pub fn write_dec_u8(value: u8) {
     if value >= 100 {
-        write_byte(b'0' + value / 100);
+        write_log_byte(b'0' + value / 100);
     }
     if value >= 10 {
-        write_byte(b'0' + (value / 10) % 10);
+        write_log_byte(b'0' + (value / 10) % 10);
     }
-    write_byte(b'0' + value % 10);
+    write_log_byte(b'0' + value % 10);
 }
 
 pub fn write_str(text: &str) {
     for byte in text.bytes() {
-        write_byte(byte);
+        write_log_byte(byte);
     }
 }
 
@@ -62,10 +62,15 @@ fn write_byte(byte: u8) {
     }
 }
 
+fn write_log_byte(byte: u8) {
+    write_byte(byte);
+    services::gui::kernel_log_byte(byte);
+}
+
 fn write_nibble(value: u8) {
     let digit = match value {
         0..=9 => b'0' + value,
         _ => b'a' + (value - 10),
     };
-    write_byte(digit);
+    write_log_byte(digit);
 }

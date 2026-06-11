@@ -29,6 +29,7 @@ pub mod gui {
     static mut ANSI_STATE: u8 = 0;
     static mut CSI_VALUE: usize = 0;
     static mut CSI_HAS_VALUE: bool = false;
+    static mut KERNEL_LOG_VISIBLE: bool = true;
 
     pub fn install(framebuffer: Framebuffer) {
         unsafe {
@@ -78,6 +79,20 @@ pub mod gui {
             reset_terminal_state();
         }
         reset_terminal_screen();
+    }
+
+    pub fn kernel_log_byte(byte: u8) {
+        unsafe {
+            if KERNEL_LOG_VISIBLE {
+                draw_terminal_byte(byte);
+            }
+        }
+    }
+
+    pub fn set_kernel_log_visible(visible: bool) {
+        unsafe {
+            KERNEL_LOG_VISIBLE = visible;
+        }
     }
 
     pub fn console_seq() -> u64 {
@@ -298,7 +313,7 @@ pub mod gui {
         let x = col * font::ADVANCE;
         let y = row * TERM_LINE_H;
         rect(x, y, font::ADVANCE, TERM_LINE_H, TERM_BG);
-        if byte != b' ' {
+        if byte >= 0x20 && byte != b' ' {
             draw_char(x, y, byte, TERM_FG);
         }
     }

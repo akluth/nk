@@ -7,7 +7,7 @@ use crate::{
     gdt,
     memory::{self, PageTableRoot},
     scheduler::{self, TrapFrame, UserAbi},
-    serial,
+    serial, services,
 };
 
 pub type VirtAddr = u64;
@@ -328,7 +328,7 @@ fn linux_stack_top(index: usize, argv: &[&[u8]]) -> Option<VirtAddr> {
         b"USER=root".as_slice(),
         b"LOGNAME=root".as_slice(),
         b"HOSTNAME=archiso".as_slice(),
-        b"PS1=root@archiso ~ # ".as_slice(),
+        b"PS1=# ".as_slice(),
     ];
 
     if !memory::clear_user_stack(index) {
@@ -432,6 +432,7 @@ pub fn start_first_task() -> ! {
     let frame = scheduler::first_user_frame().expect("ring3 frame missing");
 
     serial::write_line("nk: entering ring3");
+    services::gui::set_kernel_log_visible(false);
     unsafe {
         enter_ring3_frame(pml4, &frame, gdt::kernel_stack_top());
     }
