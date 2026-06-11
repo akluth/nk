@@ -36,6 +36,18 @@ impl Framebuffer {
         let x_end = (x + width).min(self.width);
         let y_end = (y + height).min(self.height);
 
+        if self.bytes_per_pixel == 4 {
+            unsafe {
+                for yy in y..y_end {
+                    let row = self.address.add(yy * self.pitch) as *mut u32;
+                    for xx in x..x_end {
+                        write_volatile(row.add(xx), color.0);
+                    }
+                }
+            }
+            return;
+        }
+
         for yy in y..y_end {
             for xx in x..x_end {
                 self.pixel(xx, yy, color);
@@ -51,11 +63,22 @@ impl Framebuffer {
 
         let copy_rows = self.height - rows;
         unsafe {
-            for y in 0..copy_rows {
-                let dst = self.address.add(y * self.pitch);
-                let src = self.address.add((y + rows) * self.pitch);
-                for byte in 0..self.pitch {
-                    write_volatile(dst.add(byte), read_volatile(src.add(byte)));
+            if self.bytes_per_pixel == 4 {
+                let words_per_row = self.pitch / 4;
+                for y in 0..copy_rows {
+                    let dst = self.address.add(y * self.pitch) as *mut u32;
+                    let src = self.address.add((y + rows) * self.pitch) as *const u32;
+                    for word in 0..words_per_row {
+                        write_volatile(dst.add(word), read_volatile(src.add(word)));
+                    }
+                }
+            } else {
+                for y in 0..copy_rows {
+                    let dst = self.address.add(y * self.pitch);
+                    let src = self.address.add((y + rows) * self.pitch);
+                    for byte in 0..self.pitch {
+                        write_volatile(dst.add(byte), read_volatile(src.add(byte)));
+                    }
                 }
             }
         }

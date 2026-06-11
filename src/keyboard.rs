@@ -6,6 +6,7 @@ struct KeyboardBuffer {
     bytes: [u8; BUFFER_LEN],
     read: usize,
     write: usize,
+    shift: bool,
 }
 
 impl KeyboardBuffer {
@@ -14,6 +15,7 @@ impl KeyboardBuffer {
             bytes: [0; BUFFER_LEN],
             read: 0,
             write: 0,
+            shift: false,
         }
     }
 
@@ -35,60 +37,92 @@ unsafe impl Sync for GlobalKeyboard {}
 static KEYBOARD: GlobalKeyboard = GlobalKeyboard(UnsafeCell::new(KeyboardBuffer::new()));
 
 pub fn decode_scancode(scancode: u8) -> Option<u8> {
-    if scancode & 0x80 != 0 {
-        return None;
+    unsafe {
+        let keyboard = &mut *KEYBOARD.0.get();
+        match scancode {
+            0x2a | 0x36 => {
+                keyboard.shift = true;
+                return None;
+            }
+            0xaa | 0xb6 => {
+                keyboard.shift = false;
+                return None;
+            }
+            code if code & 0x80 != 0 => return None,
+            code => return decode(code, keyboard.shift),
+        }
     }
-
-    decode(scancode)
 }
 
 pub fn pop_key() -> Option<u8> {
     unsafe { (*KEYBOARD.0.get()).pop() }
 }
 
-fn decode(scancode: u8) -> Option<u8> {
-    match scancode {
-        0x02 => Some(b'1'),
-        0x03 => Some(b'2'),
-        0x04 => Some(b'3'),
-        0x05 => Some(b'4'),
-        0x06 => Some(b'5'),
-        0x07 => Some(b'6'),
-        0x08 => Some(b'7'),
-        0x09 => Some(b'8'),
-        0x0a => Some(b'9'),
-        0x0b => Some(b'0'),
-        0x0e => Some(8),
-        0x1c => Some(b'\n'),
-        0x39 => Some(b' '),
-        0x10 => Some(b'q'),
-        0x11 => Some(b'w'),
-        0x12 => Some(b'e'),
-        0x13 => Some(b'r'),
-        0x14 => Some(b't'),
-        0x15 => Some(b'y'),
-        0x16 => Some(b'u'),
-        0x17 => Some(b'i'),
-        0x18 => Some(b'o'),
-        0x19 => Some(b'p'),
-        0x1e => Some(b'a'),
-        0x1f => Some(b's'),
-        0x20 => Some(b'd'),
-        0x21 => Some(b'f'),
-        0x22 => Some(b'g'),
-        0x23 => Some(b'h'),
-        0x24 => Some(b'j'),
-        0x25 => Some(b'k'),
-        0x26 => Some(b'l'),
-        0x2c => Some(b'z'),
-        0x2d => Some(b'x'),
-        0x2e => Some(b'c'),
-        0x2f => Some(b'v'),
-        0x30 => Some(b'b'),
-        0x31 => Some(b'n'),
-        0x32 => Some(b'm'),
-        0x34 => Some(b'.'),
-        0x35 => Some(b'/'),
-        _ => None,
+fn decode(scancode: u8, shift: bool) -> Option<u8> {
+    let byte = match scancode {
+        0x02 => if shift { b'!' } else { b'1' },
+        0x03 => if shift { b'"' } else { b'2' },
+        0x04 => if shift { 0 } else { b'3' },
+        0x05 => if shift { b'$' } else { b'4' },
+        0x06 => if shift { b'%' } else { b'5' },
+        0x07 => if shift { b'&' } else { b'6' },
+        0x08 => if shift { b'/' } else { b'7' },
+        0x09 => if shift { b'(' } else { b'8' },
+        0x0a => if shift { b')' } else { b'9' },
+        0x0b => if shift { b'=' } else { b'0' },
+        0x0c => if shift { b'?' } else { b'-' },
+        0x0d => if shift { b'`' } else { b'\'' },
+        0x0e => 8,
+        0x1c => b'\n',
+        0x39 => b' ',
+        0x10 => letter(b'q', shift),
+        0x11 => letter(b'w', shift),
+        0x12 => letter(b'e', shift),
+        0x13 => letter(b'r', shift),
+        0x14 => letter(b't', shift),
+        0x15 => letter(b'z', shift),
+        0x16 => letter(b'u', shift),
+        0x17 => letter(b'i', shift),
+        0x18 => letter(b'o', shift),
+        0x19 => letter(b'p', shift),
+        0x1a => 0,
+        0x1b => if shift { b'*' } else { b'+' },
+        0x1e => letter(b'a', shift),
+        0x1f => letter(b's', shift),
+        0x20 => letter(b'd', shift),
+        0x21 => letter(b'f', shift),
+        0x22 => letter(b'g', shift),
+        0x23 => letter(b'h', shift),
+        0x24 => letter(b'j', shift),
+        0x25 => letter(b'k', shift),
+        0x26 => letter(b'l', shift),
+        0x27 => 0,
+        0x28 => 0,
+        0x29 => if shift { b'>' } else { b'^' },
+        0x2b => if shift { b'\'' } else { b'#' },
+        0x2c => letter(b'y', shift),
+        0x2d => letter(b'x', shift),
+        0x2e => letter(b'c', shift),
+        0x2f => letter(b'v', shift),
+        0x30 => letter(b'b', shift),
+        0x31 => letter(b'n', shift),
+        0x32 => letter(b'm', shift),
+        0x33 => if shift { b';' } else { b',' },
+        0x34 => if shift { b':' } else { b'.' },
+        0x35 => if shift { b'_' } else { b'-' },
+        _ => return None,
+    };
+    if byte == 0 {
+        None
+    } else {
+        Some(byte)
+    }
+}
+
+const fn letter(byte: u8, shift: bool) -> u8 {
+    if shift {
+        byte - 32
+    } else {
+        byte
     }
 }

@@ -8,6 +8,7 @@ const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
 const SYS_STAT: u64 = 4;
 const SYS_FSTAT: u64 = 5;
+const SYS_LSTAT: u64 = 6;
 const SYS_POLL: u64 = 7;
 const SYS_MMAP: u64 = 9;
 const SYS_MPROTECT: u64 = 10;
@@ -34,6 +35,12 @@ const SYS_GETEGID: u64 = 108;
 const SYS_GETPPID: u64 = 110;
 const SYS_TKILL: u64 = 200;
 const SYS_ARCH_PRCTL: u64 = 158;
+const SYS_GETXATTR: u64 = 191;
+const SYS_LGETXATTR: u64 = 192;
+const SYS_FGETXATTR: u64 = 193;
+const SYS_LISTXATTR: u64 = 194;
+const SYS_LLISTXATTR: u64 = 195;
+const SYS_FLISTXATTR: u64 = 196;
 const SYS_SET_TID_ADDRESS: u64 = 218;
 const SYS_GETDENTS64: u64 = 217;
 const SYS_BRK: u64 = 12;
@@ -66,6 +73,7 @@ const EINVAL: i64 = -22;
 const ENOSYS: i64 = -38;
 const EAGAIN: i64 = -11;
 const EMFILE: i64 = -24;
+const ENODATA: i64 = -61;
 
 const CHILD_SLOT: usize = 3;
 const CHILD_PID: u64 = (CHILD_SLOT + 1) as u64;
@@ -146,7 +154,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = close(frame.rdi as i32) as u64;
             true
         }
-        SYS_STAT => {
+        SYS_STAT | SYS_LSTAT => {
             frame.rax = stat_path(frame.rdi as *const u8, frame.rsi as *mut u8) as u64;
             true
         }
@@ -288,6 +296,14 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_TKILL => {
+            frame.rax = 0;
+            true
+        }
+        SYS_GETXATTR | SYS_LGETXATTR | SYS_FGETXATTR => {
+            frame.rax = ENODATA as u64;
+            true
+        }
+        SYS_LISTXATTR | SYS_LLISTXATTR | SYS_FLISTXATTR => {
             frame.rax = 0;
             true
         }
@@ -648,15 +664,17 @@ fn write(fd: i32, buffer: *const u8, len: usize) -> i64 {
     if fd != 1 && fd != 2 {
         return EBADF;
     }
-    if len > 4096 {
-        return EINVAL;
-    }
 
-    let bytes = unsafe { core::slice::from_raw_parts(buffer, len) };
-    for byte in bytes {
-        serial::write_str_byte(*byte);
+    let mut written = 0usize;
+    while written < len {
+        let count = (len - written).min(4096);
+        let bytes = unsafe { core::slice::from_raw_parts(buffer.add(written), count) };
+        for byte in bytes {
+            serial::write_str_byte(*byte);
+        }
+        services::gui::console_write(bytes);
+        written += count;
     }
-    services::gui::console_write(bytes);
     len as i64
 }
 

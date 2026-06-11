@@ -94,6 +94,9 @@ mod microkernel {
             nkfs::smoke_test();
             if can_enter_user {
                 userland::install_first_task();
+                if nkfs::preload_file(b"/bin/ls") {
+                    serial::write_line("nk: coreutils image cache warmed");
+                }
                 userland::start_first_task();
             }
 

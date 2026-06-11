@@ -10,7 +10,9 @@ const MAX_FILE_SIZE: usize = 20 * 1024 * 1024;
 const KIND_FILE: u16 = 1;
 const KIND_DIR: u16 = 2;
 
-static mut FILE_BUFFER: [u8; MAX_FILE_SIZE] = [0; MAX_FILE_SIZE];
+static mut FILE_CACHE: [u8; MAX_FILE_SIZE] = [0; MAX_FILE_SIZE];
+static mut FILE_CACHE_INODE: u32 = 0;
+static mut FILE_CACHE_LEN: usize = 0;
 static mut DIR_BUFFER: [u8; ata::SECTOR_SIZE * 16] = [0; ata::SECTOR_SIZE * 16];
 
 #[derive(Clone, Copy)]
@@ -29,6 +31,7 @@ pub struct Metadata {
 
 #[derive(Clone, Copy)]
 struct Inode {
+    number: u32,
     kind: u16,
     size: usize,
     extent_start: u32,
@@ -48,13 +51,32 @@ pub fn read_file(path: &[u8]) -> Option<&'static [u8]> {
     if inode.kind != KIND_FILE || inode.size > MAX_FILE_SIZE {
         return None;
     }
+    unsafe {
+        if FILE_CACHE_INODE == inode.number && FILE_CACHE_LEN == inode.size {
+            return Some(core::slice::from_raw_parts(
+                ptr::addr_of!(FILE_CACHE).cast(),
+                FILE_CACHE_LEN,
+            ));
+        }
+    }
     read_extent(
         inode.extent_start,
         inode.size,
-        ptr::addr_of_mut!(FILE_BUFFER).cast(),
+        ptr::addr_of_mut!(FILE_CACHE).cast(),
         MAX_FILE_SIZE,
     )?;
-    unsafe { Some(&FILE_BUFFER[..inode.size]) }
+    unsafe {
+        FILE_CACHE_INODE = inode.number;
+        FILE_CACHE_LEN = inode.size;
+        Some(core::slice::from_raw_parts(
+            ptr::addr_of!(FILE_CACHE).cast(),
+            inode.size,
+        ))
+    }
+}
+
+pub fn preload_file(path: &[u8]) -> bool {
+    read_file(path).is_some()
 }
 
 pub fn read_dir(path: &[u8]) -> Option<&'static [u8]> {
@@ -193,6 +215,7 @@ fn read_inode(fs: Superblock, inode_number: u32) -> Option<Inode> {
         return None;
     }
     Some(Inode {
+        number: inode_number,
         kind: read_u16(&sector, offset)?,
         size: read_u64(&sector, offset + 8)? as usize,
         extent_start: read_u32(&sector, offset + 16)?,
@@ -203,16 +226,23 @@ fn read_extent(start_block: u32, size: usize, out: *mut u8, out_len: usize) -> O
     if size > out_len {
         return None;
     }
-    let mut sector = [0; ata::SECTOR_SIZE];
     let sectors = align_up(size, ata::SECTOR_SIZE) / ata::SECTOR_SIZE;
     let mut written = 0usize;
-    for index in 0..sectors {
-        if !ata::read_sector(start_block + index as u32, &mut sector) {
+    let mut sector_buffer = [0u8; ata::SECTOR_SIZE * 32];
+    while written < size {
+        let remaining_sectors = sectors - (written / ata::SECTOR_SIZE);
+        let chunk_sectors = remaining_sectors.min(32);
+        let chunk_bytes = chunk_sectors * ata::SECTOR_SIZE;
+        if !ata::read_sectors(
+            start_block + (written / ata::SECTOR_SIZE) as u32,
+            chunk_sectors,
+            &mut sector_buffer[..chunk_bytes],
+        ) {
             return None;
         }
-        let count = (size - written).min(ata::SECTOR_SIZE);
+        let count = (size - written).min(chunk_bytes);
         unsafe {
-            ptr::copy_nonoverlapping(sector.as_ptr(), out.add(written), count);
+            ptr::copy_nonoverlapping(sector_buffer.as_ptr(), out.add(written), count);
         }
         written += count;
     }
