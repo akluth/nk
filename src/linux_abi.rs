@@ -100,6 +100,8 @@ struct GlobalOpenFile(UnsafeCell<OpenFile>);
 unsafe impl Sync for GlobalOpenFile {}
 
 static FILE3: GlobalOpenFile = GlobalOpenFile(UnsafeCell::new(OpenFile::empty()));
+const FD3_BUFFER_CAP: usize = 256 * 1024;
+static mut FD3_BUFFER: [u8; FD3_BUFFER_CAP] = [0; FD3_BUFFER_CAP];
 const INPUT_LINE_CAP: usize = 256;
 const READY_INPUT_CAP: usize = 512;
 static mut INPUT_LINE: [u8; INPUT_LINE_CAP] = [0; INPUT_LINE_CAP];
@@ -379,10 +381,17 @@ fn open_at(dirfd: i32, path: *const u8) -> i64 {
     let Some(data) = data else {
         return ENOENT;
     };
+    if data.len() > FD3_BUFFER_CAP {
+        return EINVAL;
+    }
 
     unsafe {
+        FD3_BUFFER[..data.len()].copy_from_slice(data);
         let file = &mut *FILE3.0.get();
-        file.data = Some(data);
+        file.data = Some(core::slice::from_raw_parts(
+            core::ptr::addr_of!(FD3_BUFFER).cast(),
+            data.len(),
+        ));
         file.offset = 0;
         file.is_dir = meta.kind == 2;
         file.mode = if meta.kind == 2 { 0o040555 } else { 0o100555 };
