@@ -141,6 +141,7 @@ $NshElf = Join-Path $Build "user\nsh.elf"
 $InitElf = Join-Path $Build "user\init.elf"
 $BashElf = Join-Path $Build "user\bash.elf"
 $HelloTxt = Join-Path $Root "apps\HELLO.TXT"
+$FontPsf = Join-Path $Root "apps\font.psf"
 $AppFiles = @(
     "$GuiElf=/bin/gui",
     "$GuiElf=/GUI.elf",
@@ -149,6 +150,7 @@ $AppFiles = @(
     "$InitElf=/bin/init",
     "$NshElf=/bin/nsh",
     "$BashElf=/bin/bash",
+    "$FontPsf=/etc/font.psf",
     "$HelloTxt=/hello.txt",
     "$HelloTxt=/HELLO.TXT"
 )

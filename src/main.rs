@@ -92,6 +92,15 @@ mod microkernel {
             virtio::init();
             ata::smoke_test();
             nkfs::smoke_test();
+            if let Some(font) = nkfs::read_file(b"/etc/font.psf") {
+                if services::gui::load_font_psf(font) {
+                    serial::write_line("nk: psf font loaded from /etc/font.psf");
+                } else {
+                    serial::write_line("nk: psf font load failed");
+                }
+            } else {
+                serial::write_line("nk: /etc/font.psf missing");
+            }
             if can_enter_user {
                 userland::install_first_task();
                 if nkfs::preload_file(b"/bin/ls") {

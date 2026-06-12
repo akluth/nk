@@ -20,7 +20,6 @@ pub mod gui {
     const TERM_MAX_ROWS: usize = 64;
     const TERM_BG: u32 = 0x00000000;
     const TERM_FG: u32 = 0x00d8d8d8;
-    const TERM_LINE_H: usize = font::HEIGHT + 2;
     static mut TERM_BYTES: [[u8; TERM_MAX_COLS]; TERM_MAX_ROWS] =
         [[0; TERM_MAX_COLS]; TERM_MAX_ROWS];
     static mut TERM_LENS: [usize; TERM_MAX_ROWS] = [0; TERM_MAX_ROWS];
@@ -57,8 +56,18 @@ pub mod gui {
         let mut cursor = x;
         for byte in text {
             draw_char(cursor, y, *byte, color);
-            cursor += font::ADVANCE;
+            cursor += font::advance();
         }
+    }
+
+    pub fn load_font_psf(bytes: &[u8]) -> bool {
+        if !font::load_psf(bytes) {
+            return false;
+        }
+        unsafe {
+            replay_console_to_terminal();
+        }
+        true
     }
 
     pub fn console_write(bytes: &[u8]) {
@@ -133,11 +142,13 @@ pub mod gui {
     }
 
     fn draw_char(x: usize, y: usize, byte: u8, color: u32) {
-        let glyph = font::glyph(byte);
+        if !font::is_loaded() {
+            return;
+        }
         with_framebuffer(|fb| {
-            for (row, bits) in glyph.iter().enumerate() {
-                for col in 0..font::WIDTH {
-                    if bits & (1 << (font::WIDTH - 1 - col)) != 0 {
+            for row in 0..font::height() {
+                for col in 0..font::width() {
+                    if font::glyph_bit(byte, row, col) {
                         fb.pixel(x + col, y + row, Color(color));
                     }
                 }
@@ -194,9 +205,9 @@ pub mod gui {
 
     unsafe fn terminal_grid() -> Option<(usize, usize)> {
         let framebuffer = (*FRAMEBUFFER.0.get()).as_ref()?;
-        let cols = (framebuffer.width() / font::ADVANCE)
+        let cols = (framebuffer.width() / font::advance())
             .clamp(1, TERM_MAX_COLS);
-        let rows = (framebuffer.height() / TERM_LINE_H).clamp(1, TERM_MAX_ROWS);
+        let rows = (framebuffer.height() / term_line_h()).clamp(1, TERM_MAX_ROWS);
         Some((cols, rows))
     }
 
@@ -218,6 +229,19 @@ pub mod gui {
         clear(TERM_BG);
     }
 
+    unsafe fn replay_console_to_terminal() {
+        let len = CONSOLE_WRITE.min(CONSOLE_LEN);
+        let start = CONSOLE_WRITE.saturating_sub(len);
+        reset_terminal_state();
+        clear(TERM_BG);
+        for index in 0..len {
+            let byte = CONSOLE_BYTES[(start + index) % CONSOLE_LEN];
+            draw_terminal_byte(byte);
+        }
+        flush_dirty_terminal();
+        show_cursor();
+    }
+
     unsafe fn scroll_terminal(rows: usize, cols: usize) {
         for row in 1..rows {
             TERM_BYTES[row - 1] = TERM_BYTES[row];
@@ -225,7 +249,7 @@ pub mod gui {
         }
         TERM_BYTES[rows - 1] = [0; TERM_MAX_COLS];
         TERM_LENS[rows - 1] = 0;
-        with_framebuffer(|fb| fb.scroll_up(TERM_LINE_H, Color(TERM_BG)));
+        with_framebuffer(|fb| fb.scroll_up(term_line_h(), Color(TERM_BG)));
         TERM_DIRTY[rows - 1] = true;
     }
 
@@ -321,21 +345,21 @@ pub mod gui {
     }
 
     unsafe fn draw_terminal_row(row: usize, cols: usize) {
-        let y = row * TERM_LINE_H;
-        rect(0, y, cols * font::ADVANCE, TERM_LINE_H, TERM_BG);
+        let y = row * term_line_h();
+        rect(0, y, cols * font::advance(), term_line_h(), TERM_BG);
         let len = TERM_LENS[row].min(cols);
         for col in 0..len {
             let byte = TERM_BYTES[row][col];
             if byte >= 0x20 && byte != b' ' {
-                draw_char(col * font::ADVANCE, y, byte, TERM_FG);
+                draw_char(col * font::advance(), y, byte, TERM_FG);
             }
         }
     }
 
     unsafe fn draw_terminal_cell(col: usize, row: usize, byte: u8) {
-        let x = col * font::ADVANCE;
-        let y = row * TERM_LINE_H;
-        rect(x, y, font::ADVANCE, TERM_LINE_H, TERM_BG);
+        let x = col * font::advance();
+        let y = row * term_line_h();
+        rect(x, y, font::advance(), term_line_h(), TERM_BG);
         if byte >= 0x20 && byte != b' ' {
             draw_char(x, y, byte, TERM_FG);
         }
@@ -355,8 +379,12 @@ pub mod gui {
         if TEXT_COL >= cols || TEXT_ROW >= rows {
             return;
         }
-        let x = TEXT_COL * font::ADVANCE;
-        let y = TEXT_ROW * TERM_LINE_H + font::HEIGHT;
-        rect(x, y, font::WIDTH, 2, TERM_FG);
+        let x = TEXT_COL * font::advance();
+        let y = TEXT_ROW * term_line_h() + font::height();
+        rect(x, y, font::width(), 2, TERM_FG);
+    }
+
+    fn term_line_h() -> usize {
+        font::line_height()
     }
 }
