@@ -894,7 +894,7 @@ fn native_spawn(
         return false;
     }
     if name == b"yes" {
-        crate::linux_abi::set_stdout_budget(96);
+        crate::linux_abi::set_stdout_budget(12);
     }
     if let Some(task_switch) = scheduler::block_current_for_spawn(frame) {
         unsafe {
