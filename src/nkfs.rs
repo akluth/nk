@@ -1,6 +1,6 @@
 use core::ptr;
 
-use crate::{ata, serial, services};
+use crate::{block, serial, services};
 
 const MAGIC: &[u8; 8] = b"NKFSv1\0\0";
 const VERSION: u32 = 1;
@@ -17,8 +17,8 @@ static mut FILE_CACHE_LEN: usize = 0;
 static mut SMALL_FILE_CACHE: [u8; SMALL_FILE_CACHE_SIZE] = [0; SMALL_FILE_CACHE_SIZE];
 static mut SMALL_FILE_CACHE_INODE: u32 = 0;
 static mut SMALL_FILE_CACHE_LEN: usize = 0;
-static mut DIR_BUFFER: [u8; ata::SECTOR_SIZE * 16] = [0; ata::SECTOR_SIZE * 16];
-static mut EXTENT_BUFFER: [u8; ata::SECTOR_SIZE * 128] = [0; ata::SECTOR_SIZE * 128];
+static mut DIR_BUFFER: [u8; block::SECTOR_SIZE * 16] = [0; block::SECTOR_SIZE * 16];
+static mut EXTENT_BUFFER: [u8; block::SECTOR_SIZE * 128] = [0; block::SECTOR_SIZE * 128];
 
 #[derive(Clone, Copy)]
 struct Superblock {
@@ -102,10 +102,6 @@ pub fn read_file(path: &[u8]) -> Option<&'static [u8]> {
     }
 }
 
-pub fn preload_file(path: &[u8]) -> bool {
-    read_file(path).is_some()
-}
-
 pub fn write_file_to_console(path: &[u8]) -> bool {
     let Some(data) = read_file(path) else {
         write_console(b"cat: not found\n");
@@ -161,14 +157,14 @@ fn write_console(bytes: &[u8]) {
 pub fn read_dir(path: &[u8]) -> Option<&'static [u8]> {
     let fs = mount()?;
     let inode = resolve_path(fs, path)?;
-    if inode.kind != KIND_DIR || inode.size > ata::SECTOR_SIZE * 16 {
+    if inode.kind != KIND_DIR || inode.size > block::SECTOR_SIZE * 16 {
         return None;
     }
     read_extent(
         inode.extent_start,
         inode.size,
         ptr::addr_of_mut!(DIR_BUFFER).cast(),
-        ata::SECTOR_SIZE * 16,
+        block::SECTOR_SIZE * 16,
     )?;
     unsafe {
         Some(core::slice::from_raw_parts(
@@ -192,8 +188,8 @@ pub fn exists(path: &[u8]) -> bool {
 }
 
 fn mount() -> Option<Superblock> {
-    let mut sector = [0; ata::SECTOR_SIZE];
-    if !ata::read_sector(0, &mut sector) {
+    let mut sector = [0; block::SECTOR_SIZE];
+    if !block::read_sector(0, &mut sector) {
         return None;
     }
     if &sector[0..8] != MAGIC {
@@ -203,7 +199,7 @@ fn mount() -> Option<Superblock> {
         return None;
     }
     let block_size = read_u32(&sector, 12)?;
-    if block_size as usize != ata::SECTOR_SIZE {
+    if block_size as usize != block::SECTOR_SIZE {
         return None;
     }
     Some(Superblock {
@@ -250,14 +246,14 @@ fn resolve_path(fs: Superblock, path: &[u8]) -> Option<Inode> {
 }
 
 fn find_dir_entry(dir: Inode, name: &[u8]) -> Option<u32> {
-    if dir.size > ata::SECTOR_SIZE * 16 {
+    if dir.size > block::SECTOR_SIZE * 16 {
         return None;
     }
     read_extent(
         dir.extent_start,
         dir.size,
         ptr::addr_of_mut!(DIR_BUFFER).cast(),
-        ata::SECTOR_SIZE * 16,
+        block::SECTOR_SIZE * 16,
     )?;
     let data = unsafe { core::slice::from_raw_parts(ptr::addr_of!(DIR_BUFFER).cast(), dir.size) };
     let mut offset = 0usize;
@@ -284,13 +280,13 @@ fn read_inode(fs: Superblock, inode_number: u32) -> Option<Inode> {
 
     let byte_offset = fs.inode_table_start as usize * fs.block_size as usize
         + (inode_number as usize - 1) * INODE_SIZE;
-    let lba = byte_offset / ata::SECTOR_SIZE;
-    let offset = byte_offset % ata::SECTOR_SIZE;
-    let mut sector = [0; ata::SECTOR_SIZE];
-    if !ata::read_sector(lba as u32, &mut sector) {
+    let lba = byte_offset / block::SECTOR_SIZE;
+    let offset = byte_offset % block::SECTOR_SIZE;
+    let mut sector = [0; block::SECTOR_SIZE];
+    if !block::read_sector(lba as u32, &mut sector) {
         return None;
     }
-    if offset + INODE_SIZE > ata::SECTOR_SIZE {
+    if offset + INODE_SIZE > block::SECTOR_SIZE {
         return None;
     }
     Some(Inode {
@@ -305,17 +301,17 @@ fn read_extent(start_block: u32, size: usize, out: *mut u8, out_len: usize) -> O
     if size > out_len {
         return None;
     }
-    let sectors = align_up(size, ata::SECTOR_SIZE) / ata::SECTOR_SIZE;
+    let sectors = align_up(size, block::SECTOR_SIZE) / block::SECTOR_SIZE;
     let mut written = 0usize;
     while written < size {
-        let remaining_sectors = sectors - (written / ata::SECTOR_SIZE);
+        let remaining_sectors = sectors - (written / block::SECTOR_SIZE);
         let chunk_sectors = remaining_sectors.min(128);
-        let chunk_bytes = chunk_sectors * ata::SECTOR_SIZE;
+        let chunk_bytes = chunk_sectors * block::SECTOR_SIZE;
         let buffer = unsafe {
             core::slice::from_raw_parts_mut(ptr::addr_of_mut!(EXTENT_BUFFER).cast(), chunk_bytes)
         };
-        if !ata::read_sectors(
-            start_block + (written / ata::SECTOR_SIZE) as u32,
+        if !block::read_sectors(
+            start_block + (written / block::SECTOR_SIZE) as u32,
             chunk_sectors,
             buffer,
         ) {

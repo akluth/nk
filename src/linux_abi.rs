@@ -151,10 +151,11 @@ pub fn reset_process_state(index: usize) {
     }
 }
 
-pub fn set_stdout_budget(bytes: usize) {
+pub fn set_stdout_budget_for(index: usize, bytes: usize) {
     unsafe {
-        let index = current_task_index();
-        STDOUT_BUDGETS[index] = bytes as isize;
+        if index < scheduler::USER_TASKS {
+            STDOUT_BUDGETS[index] = bytes as isize;
+        }
     }
 }
 

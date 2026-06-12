@@ -253,6 +253,9 @@ xorriso -as mkisofs \
 "$LIMINE/limine" bios-install "$BUILD/nk.iso"
 
 if [ "${1:-}" = "run" ]; then
+  cp "$BUILD/nk-root.nkfs" "$BUILD/nk-root-ata-fallback.nkfs"
   qemu-system-x86_64 -M pc -m 256M -boot d -cdrom "$BUILD/nk.iso" \
-    -drive "file=$BUILD/nk-root.nkfs,format=raw,if=ide,index=0,media=disk"
+    -drive "file=$BUILD/nk-root.nkfs,format=raw,if=none,id=rootdisk" \
+    -device "virtio-blk-pci,drive=rootdisk,disable-modern=on" \
+    -drive "file=$BUILD/nk-root-ata-fallback.nkfs,format=raw,if=ide,index=0,media=disk"
 fi

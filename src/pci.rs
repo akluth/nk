@@ -132,3 +132,25 @@ pub fn read_u32(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {
         arch::inl(CONFIG_DATA)
     }
 }
+
+pub fn write_u16(bus: u8, slot: u8, function: u8, offset: u8, value: u16) {
+    let aligned = offset & !0x03;
+    let shift = ((offset & 0x02) * 8) as u32;
+    let mut current = read_u32(bus, slot, function, aligned);
+    current &= !(0xffff << shift);
+    current |= (value as u32) << shift;
+    write_u32(bus, slot, function, aligned, current);
+}
+
+pub fn write_u32(bus: u8, slot: u8, function: u8, offset: u8, value: u32) {
+    let address = 0x8000_0000
+        | ((bus as u32) << 16)
+        | ((slot as u32) << 11)
+        | ((function as u32) << 8)
+        | ((offset as u32) & 0xfc);
+
+    unsafe {
+        arch::outl(CONFIG_ADDRESS, address);
+        arch::outl(CONFIG_DATA, value);
+    }
+}

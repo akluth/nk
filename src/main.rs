@@ -3,6 +3,7 @@
 
 mod arch;
 mod ata;
+mod block;
 mod font;
 mod framebuffer;
 mod gdt;
@@ -31,7 +32,7 @@ pub extern "C" fn _start() -> ! {
 
 mod microkernel {
     use crate::{
-        arch, ata, gdt, interrupts, ipc, limine, memory, nkfs, scheduler, serial, services,
+        arch, block, gdt, interrupts, ipc, limine, memory, nkfs, scheduler, serial, services,
         userland, virtio,
     };
 
@@ -97,7 +98,7 @@ mod microkernel {
             }
             userland::smoke_test_syscall();
             virtio::init();
-            ata::smoke_test();
+            block::init();
             nkfs::smoke_test();
             if let Some(font) = nkfs::read_file(b"/etc/font.psf") {
                 if services::gui::load_font_psf(font) {
@@ -110,9 +111,6 @@ mod microkernel {
             }
             if can_enter_user {
                 userland::install_first_task();
-                if nkfs::preload_file(b"/bin/ls") {
-                    serial::write_line("nk: coreutils image cache warmed");
-                }
                 userland::start_first_task();
             }
 

@@ -408,6 +408,18 @@ pub unsafe fn alloc_kernel_object<T>() -> Option<&'static mut T> {
     Some(&mut *((frame + HHDM_OFFSET) as *mut T))
 }
 
+pub fn kernel_virt_to_phys(virt: u64) -> Option<u64> {
+    unsafe {
+        if virt >= KERNEL_ADDRESS.virtual_base {
+            Some(virt - KERNEL_ADDRESS.virtual_base + KERNEL_ADDRESS.physical_base)
+        } else if HHDM_OFFSET != 0 && virt >= HHDM_OFFSET {
+            Some(virt - HHDM_OFFSET)
+        } else {
+            None
+        }
+    }
+}
+
 unsafe fn free_frame(frame: u64) {
     if frame != 0 && frame < MAPPED_PHYS_LIMIT && FREE_FRAME_COUNT < MAX_FREE_FRAMES {
         zero_frame(frame);

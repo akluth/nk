@@ -1,4 +1,4 @@
-use crate::{arch, serial};
+use crate::arch;
 
 const DATA: u16 = 0x1f0;
 const SECTOR_COUNT: u16 = 0x1f2;
@@ -46,15 +46,6 @@ pub fn read_sectors(lba: u32, sectors: usize, out: &mut [u8]) -> bool {
     }
 
     true
-}
-
-pub fn smoke_test() {
-    let mut sector = [0; SECTOR_SIZE];
-    if read_sector(0, &mut sector) {
-        serial::write_line("nk: ata pio disk readable");
-    } else {
-        serial::write_line("nk: ata pio disk missing");
-    }
 }
 
 unsafe fn wait_drq() -> bool {
