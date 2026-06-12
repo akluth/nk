@@ -19,9 +19,10 @@ read-only nkfs root filesystem disk.
   Ring 3 tasks.
 - Provides minimal GUI syscalls for clearing the screen, drawing rectangles,
   and drawing scaled bitmap text.
-- Boots a real static GNU Bash 5.3 `/bin/bash` as the default user process and
-  renders its terminal output directly through a minimal kernel framebuffer
-  console.
+- Starts `/bin/init` as the first Ring 3 process; the current init starts the
+  fast native `/bin/nsh` shell as the default terminal process.
+- Keeps a real static GNU Bash 5.3 `/bin/bash` available on the root disk for
+  optional execution as the Linux/POSIX ABI matures.
 - Keeps the userland GUI compositor and task viewer as optional nkfs-loaded
   programs; they are not started automatically during boot.
 - Makes the Rust uutils Coreutils multicall binary available through `/bin`
@@ -31,14 +32,15 @@ read-only nkfs root filesystem disk.
 - Includes a GNU Bash port under `ports/bash`; the port fetches upstream Bash
   5.3 sources into ignored `third_party` storage and builds a static
   `x86_64-linux-musl` ELF linked at `0x40000000`.
-- Uses a generated monospace bitmap font for GUI text.
+- Loads a Spleen 12x24 PSF2 monospace font from `/etc/font.psf` on the nkfs
+  root disk instead of compiling the font bitmap into the kernel.
 - Tracks a generic focused user-task slot so userland can build taskbar/window
   switching without making the kernel depend on specific GUI programs.
 - Delivers PS/2 keyboard input through IRQ1 and a small `read_key` syscall.
 - Delivers PS/2 mouse input through IRQ12 and a small `read_mouse` syscall.
-- Bash can start Coreutils commands on demand through the minimal
-  `fork`/`execve`/`wait4` path; `cat hello.txt` reads `/hello.txt` from the
-  nkfs root disk.
+- `nsh` can start Coreutils commands on demand through the minimal
+  `fork`/`execve`/`wait4` path; examples such as `ls /bin`, `echo ok`, and
+  `cat /hello.txt` run against the nkfs root disk.
 
 ## Architecture
 
@@ -62,17 +64,17 @@ read-only nkfs root filesystem disk.
   `openat`, `stat`, `fstat`, `lseek`, `brk`, `mmap`, `readlink`, `uname`,
   `getcwd`, `access`, `fcntl`, `ioctl`, UID/GID queries, signal setup stubs,
   time syscalls, and exit syscalls.
-- `src/font.rs`: generated fixed-size monospace bitmap font.
+- `src/font.rs`: small PSF2 font loader used by the framebuffer console.
 - `src/framebuffer.rs`: low-level pixel and rectangle drawing.
 - `src/limine.rs`: Limine framebuffer, HHDM, and kernel address requests.
 - `src/pci.rs` and `src/virtio.rs`: PCI scan, Virtio capability discovery, and
   early queue memory setup.
 - `user/gui/src/main.rs`: optional separate no_std Rust GUI/compositor
-  executable, startable from Bash as `gui` or `/bin/gui`.
+  executable, startable from the shell as `gui` or `/bin/gui`.
 - `user/gui/linker.ld`: GUI ELF linker script.
 - `user/taskview/src/main.rs`: separate no_std Rust task viewer executable.
 - `user/taskview/linker.ld`: task viewer ELF linker script.
-- `ports/bash/`: staging notes and fetch script for the real GNU Bash port.
+- `ports/bash/`: fetch/build glue for the real GNU Bash port.
 - `ports/coreutils/`: fetch/build glue for the Rust uutils Coreutils port and
   the command alias list installed into `/bin` on the nkfs root disk.
 - `scripts/mkfs-nkfs.py`: host-side nkfs image builder.
@@ -114,9 +116,10 @@ The build script creates both:
 - `build/user/gui.elf`: optional separate userland GUI executable.
 - `build/user/taskview.elf`: optional separate userland task viewer executable.
 - `build/user/coreutils.elf`: the Rust uutils Coreutils multicall executable.
+- `build/user/init.elf`: first userland process started by the kernel.
+- `build/user/nsh.elf`: native shell started by init as the standard terminal.
 - `build/user/bash.elf`: GNU Bash executable; the normal build fetches/builds
-  it on demand, copies it to the root disk as `/bin/bash`, and starts it as the
-  standard terminal process.
+  it on demand and copies it to the root disk as `/bin/bash`.
 - `build/nk-root.nkfs`: the read-only nkfs root disk containing `/bin`,
   `/etc`, `/home/root`, user programs, and small data files.
 
@@ -172,20 +175,49 @@ $disk = "$PWD\build\virtio-test.img"
 
 ## Next Useful Steps
 
-- Add a real compositor/window manager so applications submit private window
-  buffers instead of drawing directly into the shared framebuffer.
-- Extend the current single-child `fork`/`execve`/`wait4` implementation into a
-  real process table with multiple children and reaping.
-- Add pipes, descriptor duplication, signals, termios/TTY handling, and
-  job-control semantics for Bash and other real Linux/POSIX programs.
-- Load a real PSF/SSFN font from the root disk instead of compiling the generated
-  bitmap table into the kernel.
-- Add dirty-rectangle or double-buffered drawing to remove the remaining direct
-  framebuffer redraw artifacts.
-- Replace the fixed user image buffer with per-process page allocation.
-- Replace the interim C runtime shim with enough Linux process ABI support to
-  execute unmodified static Linux binaries.
-- Add argv/envp/auxv setup on the initial user stack.
-- Split GUI syscalls into a proper capability-checked IPC protocol.
-- Move the nkfs block backend from ATA PIO to Virtio block on `q35`.
-- Move more kernel-side services behind explicit userland/server boundaries.
+Already done:
+
+- Ring 3 user tasks, TSS/GDT/IDT setup, timer interrupts, and trapframe-based
+  preemptive scheduling.
+- Isolated user page-table roots for the current fixed task slots.
+- A first init process (`/bin/init`) that starts the default native shell
+  (`/bin/nsh`) instead of making the kernel depend on a shell implementation.
+- A read-only nkfs root disk with UNIX-like absolute paths, `/bin`, `/etc`,
+  `/home/root`, `/hello.txt`, `/bin/init`, `/bin/nsh`, `/bin/bash`, `/bin/gui`,
+  `/bin/taskview`, and uutils Coreutils aliases.
+- ELF loading from the nkfs root disk for native no_std programs and static
+  Linux ABI programs.
+- Optional separate GUI and task viewer binaries loaded from `/bin`; they are
+  no longer mandatory boot-time kernel payloads.
+- Rust uutils Coreutils integration with command aliases in `/bin`.
+- A minimal Linux/POSIX ABI path with enough file, directory, process, memory,
+  and terminal syscalls to run useful static userland tools.
+- Minimal `fork`/`execve`/`wait4` support so the shell can launch external
+  programs on demand.
+- PS/2 keyboard and mouse IRQ paths with small user-facing input syscalls.
+- A dynamically loaded Spleen 12x24 PSF2 font at `/etc/font.psf`.
+- A framebuffer terminal with incremental row/cell redraws instead of full
+  screen redraw on every character.
+- Early PCI/Virtio discovery and queue-memory scaffolding.
+
+Still useful next:
+
+- Turn the fixed task slots into a real process table with dynamic PID
+  allocation, parent/child relationships, robust reaping, and multiple
+  simultaneous children.
+- Replace the fixed user image buffers with real per-process virtual memory
+  objects and page allocation.
+- Expand the Linux/POSIX ABI with pipes, descriptor duplication, `poll`/`select`,
+  signals, termios/TTY handling, process groups, and job-control semantics.
+- Add proper argv/envp/auxv setup for Linux ABI program startup.
+- Move from the current framebuffer console path toward a proper TTY/console
+  subsystem so Bash can become the default shell again without special cases.
+- Add writable filesystem support or a second writable layer on top of nkfs.
+- Move the root block backend from ATA PIO to Virtio block on `q35`.
+- Complete Virtio input/block drivers beyond discovery and queue setup.
+- Give GUI applications private window buffers and route them through a real
+  compositor/window manager instead of shared framebuffer drawing.
+- Split GUI/input/filesystem services behind explicit IPC/capability boundaries
+  so the kernel stays small and userland services can evolve independently.
+- Add broader syscall/error-path tests and boot-time smoke tests for common
+  userland commands such as `ls`, `cat`, `echo`, and `pwd`.
