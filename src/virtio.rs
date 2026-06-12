@@ -1,4 +1,7 @@
-use core::sync::atomic::{compiler_fence, Ordering};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{compiler_fence, Ordering},
+};
 
 use crate::{arch, memory, pci, serial};
 
@@ -42,14 +45,14 @@ pub fn init() {
 }
 
 pub fn block_ready() -> bool {
-    unsafe { BLOCK.ready }
+    unsafe { (*BLOCK.0.get()).ready }
 }
 
 pub fn read_block_sectors(lba: u32, sectors: usize, out: &mut [u8]) -> bool {
     if sectors == 0 || out.len() < sectors * SECTOR_SIZE {
         return false;
     }
-    unsafe { BLOCK.read(lba as u64, sectors, out) }
+    unsafe { (*BLOCK.0.get()).read(lba as u64, sectors, out) }
 }
 
 struct VirtioVisitor {
@@ -93,10 +96,15 @@ struct QueueMemory {
     used: UsedRing,
 }
 
-static mut QUEUES: [QueueMemory; 2] = [QueueMemory::new(), QueueMemory::new()];
-static mut BLOCK_QUEUE: LegacyQueue = LegacyQueue::new();
-static mut BLOCK_DMA: BlockDma = BlockDma::new();
-static mut BLOCK: LegacyBlock = LegacyBlock::empty();
+struct Global<T>(UnsafeCell<T>);
+
+unsafe impl<T> Sync for Global<T> {}
+
+static QUEUES: Global<[QueueMemory; 2]> =
+    Global(UnsafeCell::new([QueueMemory::new(), QueueMemory::new()]));
+static BLOCK_QUEUE: Global<LegacyQueue> = Global(UnsafeCell::new(LegacyQueue::new()));
+static BLOCK_DMA: Global<BlockDma> = Global(UnsafeCell::new(BlockDma::new()));
+static BLOCK: Global<LegacyBlock> = Global(UnsafeCell::new(LegacyBlock::empty()));
 
 impl QueueMemory {
     const fn new() -> Self {
@@ -242,7 +250,7 @@ impl LegacyBlock {
         else {
             return false;
         };
-        let dma = &mut BLOCK_DMA;
+        let dma = &mut *BLOCK_DMA.0.get();
         let Some(out_phys) = memory::kernel_virt_to_phys(dma.bytes.as_ptr() as u64) else {
             return false;
         };
@@ -252,7 +260,7 @@ impl LegacyBlock {
         self.request.sector = lba;
         self.status = 0xff;
 
-        let queue = &mut BLOCK_QUEUE;
+        let queue = &mut *BLOCK_QUEUE.0.get();
         let desc = queue.descriptors();
         core::ptr::write_volatile(desc.add(0), Descriptor {
             addr: request_phys,
@@ -319,7 +327,7 @@ impl LegacyBlock {
 }
 
 fn try_init_legacy_block(device: pci::Device) {
-    if unsafe { BLOCK.ready } || device.device_id != 0x1001 {
+    if unsafe { (*BLOCK.0.get()).ready } || device.device_id != 0x1001 {
         return;
     }
     let bar = pci::read_bar(device, 0);
@@ -347,8 +355,9 @@ fn try_init_legacy_block(device: pci::Device) {
             serial::write_line("nk: virtio legacy block queue too small");
             return;
         }
-        BLOCK_QUEUE.clear();
-        let Some(queue_phys) = memory::kernel_virt_to_phys(BLOCK_QUEUE.bytes.as_ptr() as u64)
+        let queue = &mut *BLOCK_QUEUE.0.get();
+        queue.clear();
+        let Some(queue_phys) = memory::kernel_virt_to_phys(queue.bytes.as_ptr() as u64)
         else {
             serial::write_line("nk: virtio legacy block queue phys missing");
             return;
@@ -359,10 +368,11 @@ fn try_init_legacy_block(device: pci::Device) {
             io_base + LEGACY_DEVICE_STATUS,
             STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
         );
-        BLOCK.io_base = io_base;
-        BLOCK.queue_phys = queue_phys;
-        BLOCK.ready = true;
-        BLOCK.last_used = 0;
+        let block = &mut *BLOCK.0.get();
+        block.io_base = io_base;
+        block.queue_phys = queue_phys;
+        block.ready = true;
+        block.last_used = 0;
         serial::write_str("nk: virtio legacy block ready io=");
         serial::write_hex_u16(io_base);
         serial::write_str(" q=");
@@ -408,7 +418,7 @@ fn prepare_queue(index: usize) {
     }
 
     unsafe {
-        let queue = &mut QUEUES[index];
+        let queue = &mut (*QUEUES.0.get())[index];
         queue.available.idx = 0;
         queue.used.idx = 0;
         queue.descriptors[0].len = 0;

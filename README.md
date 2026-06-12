@@ -213,6 +213,9 @@ Already done:
 - A root block-device layer in front of nkfs, with Virtio block probing,
   ATA PIO fallback support, no boot-time Coreutils image preload, and cached
   nkfs superblock state after mount.
+- Virtio and block backend state is encapsulated behind `UnsafeCell` driver
+  globals instead of direct `static mut` references, keeping the kernel build
+  free of Rust 2024 unsafe-reference warnings.
 - Kernel panic diagnostics are printed to serial and the framebuffer boot log
   instead of silently halting.
 
@@ -227,7 +230,7 @@ Still useful next:
   subsystem so Bash can become the default shell again without special cases.
 - Add writable filesystem support or a second writable layer on top of nkfs.
 - Move the Virtio block path from polled legacy I/O toward a modern
-  interrupt-driven driver with proper queue ownership and request objects.
+  interrupt-driven driver with multiple in-flight request objects.
 - Complete Virtio input drivers beyond discovery and queue setup.
 - Give GUI applications private window buffers and route them through a real
   compositor/window manager instead of shared framebuffer drawing.
