@@ -197,6 +197,8 @@ Already done:
 - A larger reusable user process table with dynamic PID allocation, parent PID
   tracking, PID-specific `wait4`, zombie reaping, and per-task Linux ABI state
   for CWD, file descriptors, `brk`, `mmap`, and stdout limiting.
+- User process descriptors are allocated from kernel-managed physical frames
+  during boot instead of being embedded directly in the static scheduler object.
 - User memory is backed by a kernel-managed 4 KiB page pool instead of fixed
   per-slot image/stack byte arrays; ELF segments, stacks, `brk`, `mmap`, and
   `fork` copies allocate and map per-task pages on demand.
@@ -211,8 +213,8 @@ Already done:
 
 Still useful next:
 
-- Replace the compile-time user process capacity with heap/slab-backed process
-  descriptors and dynamically allocated page-table roots.
+- Replace the remaining compile-time user process capacity with a growable
+  descriptor table and dynamically allocated page-table roots.
 - Expand the Linux/POSIX ABI with pipes, descriptor duplication, `poll`/`select`,
   signals, termios/TTY handling, process groups, and job-control semantics.
 - Add proper argv/envp/auxv setup for Linux ABI program startup.

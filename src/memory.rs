@@ -397,6 +397,17 @@ unsafe fn alloc_frame() -> Option<u64> {
     None
 }
 
+pub unsafe fn alloc_kernel_object<T>() -> Option<&'static mut T> {
+    if core::mem::size_of::<T>() > PAGE_SIZE as usize
+        || core::mem::align_of::<T>() > PAGE_SIZE as usize
+    {
+        return None;
+    }
+
+    let frame = alloc_frame()?;
+    Some(&mut *((frame + HHDM_OFFSET) as *mut T))
+}
+
 unsafe fn free_frame(frame: u64) {
     if frame != 0 && frame < MAPPED_PHYS_LIMIT && FREE_FRAME_COUNT < MAX_FREE_FRAMES {
         zero_frame(frame);

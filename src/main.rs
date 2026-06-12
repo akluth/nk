@@ -88,7 +88,10 @@ mod microkernel {
                 let roots =
                     memory::create_user_address_spaces(kernel_address, hhdm_offset, framebuffer_mapping);
                 userland::install_page_table_roots(roots);
-                can_enter_user = true;
+                can_enter_user = scheduler::init_user_process_table();
+                if !can_enter_user {
+                    serial::write_line("nk: user process descriptor allocation failed");
+                }
             } else {
                 serial::write_line("nk: no kernel address or hhdm response");
             }
