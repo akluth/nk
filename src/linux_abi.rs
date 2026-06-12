@@ -18,6 +18,7 @@ const SYS_RT_SIGACTION: u64 = 13;
 const SYS_RT_SIGPROCMASK: u64 = 14;
 const SYS_IOCTL: u64 = 16;
 const SYS_WRITEV: u64 = 20;
+const SYS_PIPE: u64 = 22;
 const SYS_ACCESS: u64 = 21;
 const SYS_MADVISE: u64 = 28;
 const SYS_FCNTL: u64 = 72;
@@ -53,6 +54,8 @@ const SYS_EXIT: u64 = 60;
 const SYS_CLOCK_GETTIME: u64 = 228;
 const SYS_OPENAT: u64 = 257;
 const SYS_FACCESSAT: u64 = 269;
+const SYS_SPLICE: u64 = 275;
+const SYS_PIPE2: u64 = 293;
 const SYS_EXIT_GROUP: u64 = 231;
 const SYS_SET_ROBUST_LIST: u64 = 273;
 const SYS_NEWFSTATAT: u64 = 262;
@@ -77,10 +80,10 @@ const ENODATA: i64 = -61;
 
 const CHILD_SLOT: usize = 3;
 const CHILD_PID: u64 = (CHILD_SLOT + 1) as u64;
-const USER_MMAP_START: u64 = 0x0000_0000_4110_0000;
-const USER_MMAP_END: u64 = 0x0000_0000_411f_0000;
-const USER_BRK_START: u64 = 0x0000_0000_411f_0000;
-const USER_BRK_END: u64 = 0x0000_0000_411f_f000;
+const USER_BRK_START: u64 = 0x0000_0000_4100_0000;
+const USER_BRK_END: u64 = 0x0000_0000_4140_0000;
+const USER_MMAP_START: u64 = 0x0000_0000_4140_0000;
+const USER_MMAP_END: u64 = 0x0000_0000_41f0_0000;
 
 #[derive(Clone, Copy)]
 struct OpenFile {
@@ -128,6 +131,20 @@ static mut TASK_CWD_LENS: [usize; scheduler::USER_TASKS] = [0; scheduler::USER_T
 static mut MMAP_CURSOR: u64 = USER_MMAP_START;
 static mut PROGRAM_BREAK: u64 = USER_BRK_START;
 static mut UNKNOWN_LOGS: u64 = 0;
+
+pub fn reset_process_state(index: usize) {
+    unsafe {
+        MMAP_CURSOR = USER_MMAP_START;
+        PROGRAM_BREAK = USER_BRK_START;
+        for file in &mut *OPEN_FILES.0.get() {
+            *file = OpenFile::empty();
+        }
+        if index < scheduler::USER_TASKS && TASK_CWD_LENS[index] == 0 {
+            TASK_CWDS[index][0] = b'/';
+            TASK_CWD_LENS[index] = 1;
+        }
+    }
+}
 
 pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
     match frame.rax {
@@ -196,6 +213,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
         }
         SYS_WRITEV => {
             frame.rax = writev(frame.rdi as i32, frame.rsi as *const u8, frame.rdx as usize) as u64;
+            true
+        }
+        SYS_PIPE | SYS_PIPE2 | SYS_SPLICE => {
+            frame.rax = ENOSYS as u64;
             true
         }
         SYS_ACCESS => {

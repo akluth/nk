@@ -8,8 +8,10 @@ const SYS_READ_KEY: u64 = 19;
 const SYS_SHUTDOWN: u64 = 32;
 const SYS_WRITE: u64 = 40;
 const SYS_LS: u64 = 41;
-const SYS_CAT: u64 = 42;
 const SYS_IS_DIR: u64 = 43;
+const SYS_SPAWN_WAIT: u64 = 44;
+const SYS_CHILD_RUNNING: u64 = 45;
+const CHILD_SLOT: u64 = 1;
 
 const LINE_CAP: usize = 256;
 const CWD_CAP: usize = 256;
@@ -85,7 +87,7 @@ impl Shell {
         }
         let (cmd, arg) = split_first(line);
         match cmd {
-            b"help" => self.write(b"commands: ls cat cd pwd version shutdown bash\n"),
+            b"help" => self.write(b"commands: ls cd pwd version shutdown; external: echo cat coreutils...\n"),
             b"version" => self.write(b"nk userspace shell 0.1\n"),
             b"pwd" => {
                 self.write(&self.cwd[..self.cwd_len]);
@@ -97,16 +99,7 @@ impl Shell {
                     self.write(b"ls failed\n");
                 }
             }
-            b"cat" => {
-                let Some(arg) = arg else {
-                    self.write(b"cat: missing operand\n");
-                    return;
-                };
-                let path = self.resolve_arg(arg);
-                if syscall2(SYS_CAT, path.as_ptr() as u64, path.len() as u64) != 0 {
-                    self.write(b"cat failed\n");
-                }
-            }
+            b"cat" | b"echo" => self.run_external(cmd, arg),
             b"cd" => {
                 let path = self.resolve_arg(arg.unwrap_or(b"/"));
                 if syscall2(SYS_IS_DIR, path.as_ptr() as u64, path.len() as u64) == 0 {
@@ -119,8 +112,44 @@ impl Shell {
             b"shutdown" => {
                 syscall0(SYS_SHUTDOWN);
             }
-            b"bash" => self.write(b"bash is available at /bin/bash but not the default shell now\n"),
-            _ => self.write(b"unknown command\n"),
+            b"bash" => self.run_external(b"bash", arg),
+            _ => self.run_external(cmd, arg),
+        }
+    }
+
+    fn run_external(&self, cmd: &[u8], arg: Option<&[u8]>) {
+        let path = self.resolve_command(cmd);
+        let arg_path;
+        let arg = if let Some(arg) = arg {
+            if arg.starts_with(b"/") || arg.starts_with(b"./") || arg == b"." {
+                arg_path = self.resolve_arg(arg);
+                arg_path.as_slice()
+            } else {
+                arg
+            }
+        } else {
+            b""
+        };
+        let _ = syscall4(
+            SYS_SPAWN_WAIT,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            arg.as_ptr() as u64,
+            arg.len() as u64,
+        );
+        while syscall1(SYS_CHILD_RUNNING, CHILD_SLOT) != 0 {
+            syscall0(SYS_YIELD);
+        }
+    }
+
+    fn resolve_command(&self, cmd: &[u8]) -> Path {
+        if cmd.starts_with(b"/") || cmd.starts_with(b"./") {
+            self.resolve_arg(cmd)
+        } else {
+            let mut out = Path::new();
+            out.push(b"/bin/");
+            out.push(cmd);
+            out
         }
     }
 
@@ -130,6 +159,12 @@ impl Shell {
             out.push(&self.cwd[..self.cwd_len]);
         } else if arg.starts_with(b"/") {
             out.push(arg);
+        } else if arg.starts_with(b"./") {
+            out.push(&self.cwd[..self.cwd_len]);
+            if self.cwd_len > 1 {
+                out.push(b"/");
+            }
+            out.push(&arg[2..]);
         } else {
             out.push(&self.cwd[..self.cwd_len]);
             if self.cwd_len > 1 {
@@ -213,7 +248,13 @@ fn split_first(input: &[u8]) -> (&[u8], Option<&[u8]>) {
 fn syscall0(id: u64) -> u64 {
     let out;
     unsafe {
-        asm!("int 0x80", inlateout("rax") id => out, options(nostack, preserves_flags));
+        asm!(
+            "syscall",
+            inlateout("rax") id => out,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
     }
     out
 }
@@ -222,11 +263,46 @@ fn syscall2(id: u64, a: u64, b: u64) -> u64 {
     let out;
     unsafe {
         asm!(
-            "int 0x80",
+            "syscall",
             inlateout("rax") id => out,
             in("rdi") a,
             in("rsi") b,
-            options(nostack, preserves_flags)
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+    }
+    out
+}
+
+fn syscall1(id: u64, a: u64) -> u64 {
+    let out;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") id => out,
+            in("rdi") a,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+    }
+    out
+}
+
+fn syscall4(id: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
+    let out;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") id => out,
+            in("rdi") a,
+            in("rsi") b,
+            in("rdx") c,
+            in("r10") d,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
         );
     }
     out

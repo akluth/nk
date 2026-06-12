@@ -217,10 +217,13 @@ pub fn install_page_table_roots(roots: [Option<PageTableRoot>; scheduler::USER_T
 }
 
 pub fn install_first_task() {
-    if !install_user_elf(0, "nsh", UserAbi::Native) {
-        serial::write_line("nk: nsh elf missing; falling back to bash");
-        if !install_user_elf(0, "bash", UserAbi::Linux) {
-            serial::write_line("nk: bash elf missing; no terminal process installed");
+    if !install_user_elf(0, "init", UserAbi::Native) {
+        serial::write_line("nk: init elf missing; falling back to nsh");
+        if !install_user_elf(0, "nsh", UserAbi::Native) {
+            serial::write_line("nk: nsh elf missing; falling back to bash");
+            if !install_user_elf(0, "bash", UserAbi::Linux) {
+                serial::write_line("nk: bash elf missing; no terminal process installed");
+            }
         }
     }
     serial::write_line("nk: bash available as /bin/bash for optional exec");
@@ -294,6 +297,7 @@ pub fn exec_linux_elf(
     argv: &[&[u8]],
     frame: &mut TrapFrame,
 ) -> bool {
+    crate::linux_abi::reset_process_state(index);
     let Some(image) = crate::nkfs::read_file(path) else {
         return false;
     };
@@ -310,6 +314,34 @@ pub fn exec_linux_elf(
     let new_frame = new_task_frame(UserAbi::Linux, elf.entry, stack_top);
     scheduler::replace_user_task_frame(index, task_name, UserAbi::Linux, new_frame);
     *frame = new_frame;
+    true
+}
+
+pub fn spawn_linux_elf(
+    index: usize,
+    task_name: &'static str,
+    path: &[u8],
+    argv: &[&[u8]],
+) -> bool {
+    crate::linux_abi::reset_process_state(index);
+    let Some(image) = crate::nkfs::read_file(path) else {
+        return false;
+    };
+    if !memory::clear_user_image(index) {
+        return false;
+    }
+    let Some(elf) = load_elf(index, image) else {
+        return false;
+    };
+    let Some(stack_top) = linux_stack_top(index, argv, elf) else {
+        return false;
+    };
+    let Some(root) = (unsafe { (*USER_ADDRESS_SPACE.0.get()).root(index) }) else {
+        return false;
+    };
+
+    let frame = new_task_frame(UserAbi::Linux, elf.entry, stack_top);
+    scheduler::install_user_task(index, task_name, UserAbi::Linux, root.pml4_phys(), frame);
     true
 }
 

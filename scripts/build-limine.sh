@@ -207,6 +207,7 @@ ensure_bash_program() {
 
 build_user_program gui
 build_user_program taskview
+build_user_program init
 build_user_program nsh
 ensure_coreutils
 ensure_bash_program
@@ -216,6 +217,7 @@ app_files=(
   "$BUILD/user/gui.elf=/GUI.elf"
   "$BUILD/user/taskview.elf=/bin/taskview"
   "$BUILD/user/taskview.elf=/bin/taskviewer"
+  "$BUILD/user/init.elf=/bin/init"
   "$BUILD/user/nsh.elf=/bin/nsh"
   "$BUILD/user/bash.elf=/bin/bash"
 )

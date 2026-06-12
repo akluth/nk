@@ -254,7 +254,11 @@ impl UserScheduler {
         })
     }
 
-    fn block_current_for_child(&mut self, frame: &mut TrapFrame) -> Option<UserSwitch> {
+    fn block_current_for_child(
+        &mut self,
+        frame: &mut TrapFrame,
+        wait_status: u64,
+    ) -> Option<UserSwitch> {
         if self.installed < 2 || frame.cs & 0x3 != 0x3 {
             return None;
         }
@@ -265,7 +269,7 @@ impl UserScheduler {
         self.save_fs_base(current);
         self.tasks[current].active = false;
         self.tasks[current].waiting_child = true;
-        self.tasks[current].wait_status = frame.rsi;
+        self.tasks[current].wait_status = wait_status;
         self.current = next;
         self.restore_fs_base(self.current);
         *frame = self.tasks[self.current].frame;
@@ -459,7 +463,7 @@ impl UserScheduler {
             || self.tasks[child].waiting_stdin
             || self.tasks[child].waiting_child
         {
-            if let Some(task_switch) = self.block_current_for_child(frame) {
+            if let Some(task_switch) = self.block_current_for_child(frame, frame.rsi) {
                 return WaitResult::Blocked(task_switch);
             }
         }
@@ -492,6 +496,25 @@ impl UserScheduler {
 
     fn focus(&self) -> usize {
         self.focus
+    }
+
+    fn task_running_or_waiting(&self, index: usize) -> bool {
+        if index >= self.installed {
+            return false;
+        }
+        self.tasks[index].active || self.tasks[index].waiting_stdin || self.tasks[index].waiting_child
+    }
+
+    fn reap_task(&mut self, index: usize) {
+        if index >= self.installed {
+            return;
+        }
+        if self.tasks[index].zombie {
+            self.tasks[index].zombie = false;
+            self.tasks[index].active = false;
+            self.tasks[index].waiting_stdin = false;
+            self.tasks[index].waiting_child = false;
+        }
     }
 }
 
@@ -606,6 +629,10 @@ pub fn wait_for_child(frame: &mut TrapFrame, pid: i32) -> WaitResult {
     unsafe { (*USER_SCHEDULER.0.get()).wait_for_child(frame, pid) }
 }
 
+pub fn block_current_for_spawn(frame: &mut TrapFrame) -> Option<UserSwitch> {
+    unsafe { (*USER_SCHEDULER.0.get()).block_current_for_child(frame, 0) }
+}
+
 pub fn current_user_index() -> Option<usize> {
     unsafe {
         let scheduler = &*USER_SCHEDULER.0.get();
@@ -645,4 +672,14 @@ pub fn set_focus(index: usize) {
 
 pub fn focus() -> usize {
     unsafe { (*USER_SCHEDULER.0.get()).focus() }
+}
+
+pub fn user_task_running_or_waiting(index: usize) -> bool {
+    unsafe { (*USER_SCHEDULER.0.get()).task_running_or_waiting(index) }
+}
+
+pub fn reap_user_task(index: usize) {
+    unsafe {
+        (*USER_SCHEDULER.0.get()).reap_task(index);
+    }
 }

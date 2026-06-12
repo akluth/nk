@@ -635,7 +635,15 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
     }
 
     match frame.rax {
-        0 => {}
+        0 => {
+            if let Some(task_switch) = scheduler::schedule_user(frame) {
+                unsafe {
+                    arch::load_cr3(task_switch.pml4_phys);
+                }
+            }
+            frame.rax = 0;
+            return;
+        }
         60 | 231 if frame.cs & 0x3 == 0x3 => {
             if let Some(pml4_phys) = scheduler::exit_current_user(frame) {
                 unsafe {
@@ -741,6 +749,41 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
             };
             return;
         }
+        44 => {
+            frame.rax = if native_spawn(
+                frame.rdi as *const u8,
+                frame.rsi as usize,
+                frame.rdx as *const u8,
+                frame.r10 as usize,
+                frame,
+            ) {
+                0
+            } else {
+                1
+            };
+            return;
+        }
+        45 => {
+            let index = frame.rdi as usize;
+            let running = scheduler::user_task_running_or_waiting(index);
+            if !running {
+                scheduler::reap_user_task(index);
+            }
+            frame.rax = if running { 1 } else { 0 };
+            return;
+        }
+        46 => {
+            frame.rax = if native_exec(
+                frame.rdi as *const u8,
+                frame.rsi as usize,
+                frame,
+            ) {
+                0
+            } else {
+                1
+            };
+            return;
+        }
         32 => unsafe {
             serial::write_line("nk: shutdown requested");
             arch::outw(0x604, 0x2000);
@@ -816,6 +859,67 @@ fn native_is_dir(ptr: *const u8, len: usize) -> bool {
     crate::nkfs::metadata(path)
         .map(|metadata| metadata.kind == 2)
         .unwrap_or(false)
+}
+
+fn native_spawn(
+    path_ptr: *const u8,
+    path_len: usize,
+    arg_ptr: *const u8,
+    arg_len: usize,
+    frame: &mut scheduler::TrapFrame,
+) -> bool {
+    const CHILD_SLOT: usize = 1;
+    let mut path = [0u8; 256];
+    let Some(path) = native_path(path_ptr, path_len, &mut path) else {
+        return false;
+    };
+    let mut arg = [0u8; 256];
+    let arg_slice = if arg_len == 0 {
+        None
+    } else {
+        native_path(arg_ptr, arg_len, &mut arg)
+    };
+
+    let name = basename(path);
+    let mut argv: [&[u8]; 2] = [name, b""];
+    let argc = if let Some(arg_slice) = arg_slice {
+        argv[1] = arg_slice;
+        2
+    } else {
+        1
+    };
+
+    if !crate::userland::spawn_linux_elf(CHILD_SLOT, "exec", path, &argv[..argc]) {
+        native_console_write(b"exec failed\n".as_ptr(), b"exec failed\n".len());
+        return false;
+    }
+    if let Some(task_switch) = scheduler::block_current_for_spawn(frame) {
+        unsafe {
+            arch::load_cr3(task_switch.pml4_phys);
+        }
+    }
+    true
+}
+
+fn native_exec(path_ptr: *const u8, path_len: usize, frame: &mut scheduler::TrapFrame) -> bool {
+    let mut path = [0u8; 256];
+    let Some(path) = native_path(path_ptr, path_len, &mut path) else {
+        return false;
+    };
+    let Some(index) = scheduler::current_user_index() else {
+        return false;
+    };
+    crate::userland::exec_native_elf(index, "nsh", path, frame)
+}
+
+fn basename(path: &[u8]) -> &[u8] {
+    let mut start = 0usize;
+    for index in 0..path.len() {
+        if path[index] == b'/' {
+            start = index + 1;
+        }
+    }
+    &path[start..]
 }
 
 #[no_mangle]
