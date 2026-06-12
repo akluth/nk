@@ -3,14 +3,17 @@ use core::arch::global_asm;
 use crate::{
     arch, gdt, keyboard, linux_abi, mouse,
     scheduler::{self, UserAbi},
-    serial, services,
+    serial, services, virtio,
 };
 
 const IDT_ENTRIES: usize = 256;
+const INVALID_OPCODE_VECTOR: u8 = 6;
 const GENERAL_PROTECTION_VECTOR: u8 = 13;
 const PAGE_FAULT_VECTOR: u8 = 14;
 const TIMER_VECTOR: u8 = 32;
 const KEYBOARD_VECTOR: u8 = 33;
+const VIRTIO_BLOCK_IRQ10_VECTOR: u8 = 42;
+const VIRTIO_BLOCK_IRQ11_VECTOR: u8 = 43;
 const MOUSE_VECTOR: u8 = 44;
 const SYSCALL_VECTOR: u8 = 0x80;
 
@@ -91,10 +94,13 @@ static mut SYSCALL_USER_RSP: u64 = 0;
 
 extern "C" {
     fn isr_default();
+    fn isr_invalid_opcode();
     fn isr_general_protection();
     fn isr_page_fault();
     fn isr_timer();
     fn isr_keyboard();
+    fn isr_pic_spurious();
+    fn isr_virtio_block();
     fn isr_mouse();
     fn isr_syscall();
     fn syscall_entry();
@@ -123,6 +129,55 @@ isr_default:
     cld
     lea rdi, [rsp + 8]
     call rust_unhandled_interrupt
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
+    .global isr_invalid_opcode
+isr_invalid_opcode:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8
+    cld
+    mov rcx, [rsp + 128]
+    lea rdi, [rsp + 8]
+    mov rsi, 6
+    xor rdx, rdx
+    xor r8, r8
+    call rust_exception
+    test al, al
+    jnz 2f
+1:
+    hlt
+    jmp 1b
+2:
     add rsp, 8
     pop r15
     pop r14
@@ -374,6 +429,82 @@ isr_mouse:
     pop rax
     iretq
 
+    .global isr_pic_spurious
+isr_pic_spurious:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8
+    cld
+    call rust_pic_spurious_interrupt
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
+    .global isr_virtio_block
+isr_virtio_block:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8
+    cld
+    call rust_virtio_block_interrupt
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+
     .global isr_syscall
 isr_syscall:
     push rax
@@ -469,6 +600,8 @@ pub fn init() {
         for index in 0..IDT_ENTRIES {
             idt.add(index).write(IdtEntry::new(isr_default));
         }
+        idt.add(INVALID_OPCODE_VECTOR as usize)
+            .write(IdtEntry::new(isr_invalid_opcode));
         idt.add(GENERAL_PROTECTION_VECTOR as usize)
             .write(IdtEntry::new(isr_general_protection));
         idt.add(PAGE_FAULT_VECTOR as usize)
@@ -477,6 +610,13 @@ pub fn init() {
             .write(IdtEntry::new(isr_timer));
         idt.add(KEYBOARD_VECTOR as usize)
             .write(IdtEntry::new(isr_keyboard));
+        for vector in 34..48 {
+            idt.add(vector).write(IdtEntry::new(isr_pic_spurious));
+        }
+        idt.add(VIRTIO_BLOCK_IRQ10_VECTOR as usize)
+            .write(IdtEntry::new(isr_virtio_block));
+        idt.add(VIRTIO_BLOCK_IRQ11_VECTOR as usize)
+            .write(IdtEntry::new(isr_virtio_block));
         idt.add(MOUSE_VECTOR as usize)
             .write(IdtEntry::new(isr_mouse));
         idt.add(SYSCALL_VECTOR as usize)
@@ -489,6 +629,8 @@ pub fn init() {
         unmask_irq(0);
         unmask_irq(1);
         unmask_irq(2);
+        unmask_irq(10);
+        unmask_irq(11);
         unmask_irq(12);
     }
 
@@ -607,6 +749,27 @@ extern "C" fn rust_mouse_interrupt() {
     mouse::push_byte(byte);
     unsafe {
         send_eoi(12);
+    }
+}
+
+static mut PIC_SPURIOUS_LOGGED: bool = false;
+
+#[no_mangle]
+extern "C" fn rust_pic_spurious_interrupt() {
+    unsafe {
+        if !PIC_SPURIOUS_LOGGED {
+            PIC_SPURIOUS_LOGGED = true;
+            serial::write_line("nk: acknowledged auxiliary PIC interrupt");
+        }
+        send_eoi(15);
+    }
+}
+
+#[no_mangle]
+extern "C" fn rust_virtio_block_interrupt() {
+    virtio::handle_block_irq();
+    unsafe {
+        send_eoi(11);
     }
 }
 

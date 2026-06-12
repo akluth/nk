@@ -14,6 +14,7 @@ const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3;
 const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
 
 const QUEUE_SIZE: u16 = 256;
+const BLOCK_REQUEST_SLOTS: usize = 8;
 const SECTOR_SIZE: usize = 512;
 
 const LEGACY_DEVICE_FEATURES: u16 = 0;
@@ -53,6 +54,15 @@ pub fn read_block_sectors(lba: u32, sectors: usize, out: &mut [u8]) -> bool {
         return false;
     }
     unsafe { (*BLOCK.0.get()).read(lba as u64, sectors, out) }
+}
+
+pub fn handle_block_irq() {
+    unsafe {
+        let block = &mut *BLOCK.0.get();
+        if block.ready {
+            block.process_completions();
+        }
+    }
 }
 
 struct VirtioVisitor {
@@ -103,7 +113,8 @@ unsafe impl<T> Sync for Global<T> {}
 static QUEUES: Global<[QueueMemory; 2]> =
     Global(UnsafeCell::new([QueueMemory::new(), QueueMemory::new()]));
 static BLOCK_QUEUE: Global<LegacyQueue> = Global(UnsafeCell::new(LegacyQueue::new()));
-static BLOCK_DMA: Global<BlockDma> = Global(UnsafeCell::new(BlockDma::new()));
+static BLOCK_DMA: Global<[BlockDma; BLOCK_REQUEST_SLOTS]> =
+    Global(UnsafeCell::new([BlockDma::new(); BLOCK_REQUEST_SLOTS]));
 static BLOCK: Global<LegacyBlock> = Global(UnsafeCell::new(LegacyBlock::empty()));
 
 impl QueueMemory {
@@ -193,6 +204,7 @@ impl LegacyQueue {
 }
 
 #[repr(C, align(16))]
+#[derive(Clone, Copy)]
 struct BlockRequest {
     request_type: u32,
     reserved: u32,
@@ -204,14 +216,25 @@ struct LegacyBlock {
     queue_phys: u64,
     ready: bool,
     last_used: u16,
-    request: BlockRequest,
-    status: u8,
+    interrupt_line: u8,
+    next_avail: u16,
+    slots: [BlockSlot; BLOCK_REQUEST_SLOTS],
     logged_failure: bool,
 }
 
 #[repr(C, align(4096))]
+#[derive(Clone, Copy)]
 struct BlockDma {
     bytes: [u8; 128 * SECTOR_SIZE],
+}
+
+#[derive(Clone, Copy)]
+struct BlockSlot {
+    request: BlockRequest,
+    status: u8,
+    active: bool,
+    complete: bool,
+    ok: bool,
 }
 
 impl BlockDma {
@@ -229,12 +252,9 @@ impl LegacyBlock {
             queue_phys: 0,
             ready: false,
             last_used: 0,
-            request: BlockRequest {
-                request_type: 0,
-                reserved: 0,
-                sector: 0,
-            },
-            status: 0xff,
+            interrupt_line: 0xff,
+            next_avail: 0,
+            slots: [BlockSlot::empty(); BLOCK_REQUEST_SLOTS],
             logged_failure: false,
         }
     }
@@ -244,39 +264,78 @@ impl LegacyBlock {
             return false;
         }
         let byte_len = sectors * SECTOR_SIZE;
-        let Some(request_phys) = memory::kernel_virt_to_phys((&self.request as *const _) as u64)
-        else {
+        let Some(slot_index) = self.submit_read(lba, sectors) else {
             return false;
         };
-        let Some(status_phys) = memory::kernel_virt_to_phys((&self.status as *const _) as u64)
+
+        for _ in 0..100_000 {
+            self.process_completions();
+            if self.slots[slot_index].complete {
+                let ok = self.slots[slot_index].ok;
+                self.slots[slot_index].active = false;
+                if ok {
+                    let dma = &*BLOCK_DMA.0.get();
+                    out[..byte_len].copy_from_slice(&dma[slot_index].bytes[..byte_len]);
+                    return true;
+                }
+                return false;
+            }
+            if arch::interrupts_enabled() {
+                arch::halt();
+            }
+        }
+
+        self.slots[slot_index].active = false;
+        self.log_timeout();
+        false
+    }
+
+    unsafe fn submit_read(&mut self, lba: u64, sectors: usize) -> Option<usize> {
+        let slot_index = self.allocate_slot()?;
+        let slot = &mut self.slots[slot_index];
+        slot.request.request_type = VIRTIO_BLK_T_IN;
+        slot.request.reserved = 0;
+        slot.request.sector = lba;
+        slot.status = 0xff;
+        slot.complete = false;
+        slot.ok = false;
+        slot.active = true;
+
+        let Some(request_phys) =
+            memory::kernel_virt_to_phys((&slot.request as *const _) as u64)
         else {
-            return false;
+            slot.active = false;
+            return None;
+        };
+        let Some(status_phys) = memory::kernel_virt_to_phys((&slot.status as *const _) as u64)
+        else {
+            slot.active = false;
+            return None;
         };
         let dma = &mut *BLOCK_DMA.0.get();
-        let Some(out_phys) = memory::kernel_virt_to_phys(dma.bytes.as_ptr() as u64) else {
-            return false;
+        let Some(out_phys) = memory::kernel_virt_to_phys(dma[slot_index].bytes.as_ptr() as u64)
+        else {
+            slot.active = false;
+            return None;
         };
 
-        self.request.request_type = VIRTIO_BLK_T_IN;
-        self.request.reserved = 0;
-        self.request.sector = lba;
-        self.status = 0xff;
-
+        let byte_len = sectors * SECTOR_SIZE;
         let queue = &mut *BLOCK_QUEUE.0.get();
         let desc = queue.descriptors();
-        core::ptr::write_volatile(desc.add(0), Descriptor {
+        let head = (slot_index * 3) as u16;
+        core::ptr::write_volatile(desc.add(head as usize), Descriptor {
             addr: request_phys,
             len: core::mem::size_of::<BlockRequest>() as u32,
             flags: DESC_F_NEXT,
-            next: 1,
+            next: head + 1,
         });
-        core::ptr::write_volatile(desc.add(1), Descriptor {
+        core::ptr::write_volatile(desc.add(head as usize + 1), Descriptor {
             addr: out_phys,
             len: byte_len as u32,
             flags: DESC_F_NEXT | DESC_F_WRITE,
-            next: 2,
+            next: head + 2,
         });
-        core::ptr::write_volatile(desc.add(2), Descriptor {
+        core::ptr::write_volatile(desc.add(head as usize + 2), Descriptor {
             addr: status_phys,
             len: 1,
             flags: DESC_F_WRITE,
@@ -287,44 +346,81 @@ impl LegacyBlock {
         let avail_idx = core::ptr::read_volatile(core::ptr::addr_of!((*avail).idx));
         core::ptr::write_volatile(
             core::ptr::addr_of_mut!((*avail).ring[(avail_idx as usize) % QUEUE_SIZE as usize]),
-            0,
+            head,
         );
         compiler_fence(Ordering::SeqCst);
         core::ptr::write_volatile(
             core::ptr::addr_of_mut!((*avail).idx),
             avail_idx.wrapping_add(1),
         );
+        self.next_avail = avail_idx.wrapping_add(1);
         compiler_fence(Ordering::SeqCst);
         arch::outw(self.io_base + LEGACY_QUEUE_NOTIFY, 0);
+        Some(slot_index)
+    }
 
-        let used = queue.used();
-        for _ in 0..100_000 {
-            let used_idx = core::ptr::read_volatile(core::ptr::addr_of!((*used).idx));
-            if used_idx != self.last_used {
-                self.last_used = used_idx;
-                let _ = arch::inb(self.io_base + LEGACY_ISR_STATUS);
-                if self.status == 0 {
-                    out[..byte_len].copy_from_slice(&dma.bytes[..byte_len]);
-                    return true;
-                }
-                return false;
+    unsafe fn allocate_slot(&self) -> Option<usize> {
+        for index in 0..BLOCK_REQUEST_SLOTS {
+            if !self.slots[index].active {
+                return Some(index);
             }
         }
+        None
+    }
+
+    unsafe fn process_completions(&mut self) {
+        let queue = &mut *BLOCK_QUEUE.0.get();
+        let used = queue.used();
+        let used_idx = core::ptr::read_volatile(core::ptr::addr_of!((*used).idx));
+        while self.last_used != used_idx {
+            let entry = core::ptr::read_volatile(core::ptr::addr_of!(
+                (*used).ring[(self.last_used as usize) % QUEUE_SIZE as usize]
+            ));
+            self.last_used = self.last_used.wrapping_add(1);
+            let slot_index = (entry.id as usize) / 3;
+            if slot_index < BLOCK_REQUEST_SLOTS {
+                let slot = &mut self.slots[slot_index];
+                if slot.active {
+                    slot.complete = true;
+                    slot.ok = slot.status == 0;
+                }
+            }
+        }
+        let _ = arch::inb(self.io_base + LEGACY_ISR_STATUS);
+    }
+
+    unsafe fn log_timeout(&mut self) {
         if !self.logged_failure {
             self.logged_failure = true;
+            let queue = &mut *BLOCK_QUEUE.0.get();
+            let avail = queue.available();
+            let used = queue.used();
             serial::write_str("nk: virtio read timeout qpf=");
             serial::write_hex_u64(self.queue_phys);
             serial::write_str(" avail=");
             serial::write_hex_u16(core::ptr::read_volatile(core::ptr::addr_of!((*avail).idx)));
             serial::write_str(" used=");
             serial::write_hex_u16(core::ptr::read_volatile(core::ptr::addr_of!((*used).idx)));
-            serial::write_str(" req_status=");
-            serial::write_hex_u16(self.status as u16);
             serial::write_str(" dev_status=");
             serial::write_hex_u16(arch::inb(self.io_base + LEGACY_DEVICE_STATUS) as u16);
             serial::write_line("");
         }
-        false
+    }
+}
+
+impl BlockSlot {
+    const fn empty() -> Self {
+        Self {
+            request: BlockRequest {
+                request_type: 0,
+                reserved: 0,
+                sector: 0,
+            },
+            status: 0xff,
+            active: false,
+            complete: false,
+            ok: false,
+        }
     }
 }
 
@@ -373,12 +469,16 @@ fn try_init_legacy_block(device: pci::Device) {
         let block = &mut *BLOCK.0.get();
         block.io_base = io_base;
         block.queue_phys = queue_phys;
+        block.interrupt_line = device.interrupt_line;
         block.ready = true;
         block.last_used = 0;
+        block.next_avail = 0;
         serial::write_str("nk: virtio legacy block ready io=");
         serial::write_hex_u16(io_base);
         serial::write_str(" q=");
         serial::write_hex_u16(queue_size);
+        serial::write_str(" slots=");
+        serial::write_dec_u8(BLOCK_REQUEST_SLOTS as u8);
         serial::write_line("");
     }
 }

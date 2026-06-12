@@ -22,6 +22,15 @@ pub fn disable_interrupts() {
 }
 
 #[inline(always)]
+pub fn interrupts_enabled() -> bool {
+    let flags: u64;
+    unsafe {
+        asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags));
+    }
+    flags & (1 << 9) != 0
+}
+
+#[inline(always)]
 pub unsafe fn outb(port: u16, value: u8) {
     asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
 }
