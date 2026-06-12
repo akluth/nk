@@ -179,7 +179,7 @@ Already done:
 
 - Ring 3 user tasks, TSS/GDT/IDT setup, timer interrupts, and trapframe-based
   preemptive scheduling.
-- Isolated user page-table roots for the current fixed task slots.
+- Isolated user page-table roots for the current user process table.
 - A first init process (`/bin/init`) that starts the default native shell
   (`/bin/nsh`) instead of making the kernel depend on a shell implementation.
 - A read-only nkfs root disk with UNIX-like absolute paths, `/bin`, `/etc`,
@@ -194,9 +194,9 @@ Already done:
   and terminal syscalls to run useful static userland tools.
 - Minimal `fork`/`execve`/`wait4` support so the shell can launch external
   programs on demand.
-- Dynamic PID allocation on top of the current fixed backing slots, including
-  parent PID tracking, PID-specific `wait4`, zombie reaping, and per-task Linux
-  ABI state for CWD, file descriptors, `brk`, `mmap`, and stdout limiting.
+- A larger reusable user process table with dynamic PID allocation, parent PID
+  tracking, PID-specific `wait4`, zombie reaping, and per-task Linux ABI state
+  for CWD, file descriptors, `brk`, `mmap`, and stdout limiting.
 - User memory is backed by a kernel-managed 4 KiB page pool instead of fixed
   per-slot image/stack byte arrays; ELF segments, stacks, `brk`, `mmap`, and
   `fork` copies allocate and map per-task pages on demand.
@@ -211,7 +211,8 @@ Already done:
 
 Still useful next:
 
-- Replace the remaining fixed task-slot ceiling with a growable process table.
+- Replace the compile-time user process capacity with heap/slab-backed process
+  descriptors and dynamically allocated page-table roots.
 - Expand the Linux/POSIX ABI with pipes, descriptor duplication, `poll`/`select`,
   signals, termios/TTY handling, process groups, and job-control semantics.
 - Add proper argv/envp/auxv setup for Linux ABI program startup.

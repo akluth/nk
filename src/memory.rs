@@ -105,12 +105,16 @@ pub fn create_user_address_spaces(
         }
     }
 
-    [
-        create_user_address_space(0, kernel, framebuffer),
-        create_user_address_space(1, kernel, framebuffer),
-        create_user_address_space(2, kernel, framebuffer),
-        create_user_address_space(3, kernel, framebuffer),
-    ]
+    let mut roots = [None; USER_TASKS];
+    let mut index = 0;
+    while index < USER_TASKS {
+        roots[index] = create_user_address_space(index, kernel, framebuffer);
+        index += 1;
+    }
+    serial::write_str("nk: user process table capacity=");
+    serial::write_dec_u8(USER_TASKS as u8);
+    serial::write_line("");
+    roots
 }
 
 unsafe fn init_frame_allocator() {

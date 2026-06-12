@@ -1,6 +1,7 @@
 use core::cell::UnsafeCell;
 
-pub const USER_TASKS: usize = 4;
+pub const MAX_USER_TASKS: usize = 16;
+pub const USER_TASKS: usize = MAX_USER_TASKS;
 const IA32_FS_BASE: u32 = 0xc000_0100;
 
 #[repr(C)]
