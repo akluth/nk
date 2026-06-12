@@ -13,6 +13,7 @@ pub struct Device {
     pub device_id: u16,
     pub class: u8,
     pub subclass: u8,
+    pub interrupt_line: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -61,6 +62,7 @@ fn scan_function<V: Visitor>(visitor: &mut V, bus: u8, slot: u8, function: u8) {
         device_id: read_u16(bus, slot, function, 0x02),
         class: read_u8(bus, slot, function, 0x0b),
         subclass: read_u8(bus, slot, function, 0x0a),
+        interrupt_line: read_u8(bus, slot, function, 0x3c),
     });
 }
 

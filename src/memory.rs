@@ -83,6 +83,11 @@ static mut KERNEL_ADDRESS: KernelAddress = KernelAddress {
     virtual_base: 0,
 };
 
+unsafe extern "C" {
+    static __kernel_start: u8;
+    static __kernel_end: u8;
+}
+
 pub fn create_user_address_spaces(
     kernel: KernelAddress,
     hhdm_offset: u64,
@@ -119,6 +124,7 @@ pub fn create_user_address_spaces(
 
 unsafe fn init_frame_allocator() {
     FREE_FRAME_COUNT = 0;
+    let (kernel_start, kernel_end) = kernel_physical_range();
     let regions = limine::memory_region_count();
     for region_index in 0..regions {
         let Some(region) = limine::memory_region(region_index) else {
@@ -131,11 +137,20 @@ unsafe fn init_frame_allocator() {
         let end = (region.base.saturating_add(region.length) & !(PAGE_SIZE - 1))
             .min(MAPPED_PHYS_LIMIT);
         while frame < end && FREE_FRAME_COUNT < MAX_FREE_FRAMES {
+            if range_contains(kernel_start, kernel_end, frame) {
+                frame += PAGE_SIZE;
+                continue;
+            }
             FREE_FRAMES[FREE_FRAME_COUNT] = frame;
             FREE_FRAME_COUNT += 1;
             frame += PAGE_SIZE;
         }
     }
+    serial::write_str("nk: kernel image protected ");
+    serial::write_hex_u64(kernel_start);
+    serial::write_str("-");
+    serial::write_hex_u64(kernel_end);
+    serial::write_line("");
     serial::write_str("nk: physical frame allocator ready, frames=");
     serial::write_dec_u8((FREE_FRAME_COUNT.min(255)) as u8);
     serial::write_line("+");
@@ -143,6 +158,22 @@ unsafe fn init_frame_allocator() {
 
 const fn align_up_u64(value: u64, align: u64) -> u64 {
     (value + align - 1) & !(align - 1)
+}
+
+const fn align_down_u64(value: u64, align: u64) -> u64 {
+    value & !(align - 1)
+}
+
+unsafe fn kernel_physical_range() -> (u64, u64) {
+    let start_virt = core::ptr::addr_of!(__kernel_start) as u64;
+    let end_virt = core::ptr::addr_of!(__kernel_end) as u64;
+    let start = align_down_u64(virt_to_phys(start_virt, KERNEL_ADDRESS), PAGE_SIZE);
+    let end = align_up_u64(virt_to_phys(end_virt, KERNEL_ADDRESS), PAGE_SIZE);
+    (start, end)
+}
+
+const fn range_contains(start: u64, end: u64, frame: u64) -> bool {
+    frame >= start && frame < end
 }
 
 fn create_user_address_space(

@@ -146,6 +146,8 @@ impl pci::Visitor for VirtioVisitor {
         serial::write_hex_u16(device.device_id);
         serial::write_str(" class=");
         serial::write_hex_u16(((device.class as u16) << 8) | device.subclass as u16);
+        serial::write_str(" irq=");
+        serial::write_dec_u8(device.interrupt_line);
         serial::write_line("");
 
         classify_device(device.device_id);
