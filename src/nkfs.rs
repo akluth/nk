@@ -14,6 +14,7 @@ const KIND_DIR: u16 = 2;
 static mut FILE_CACHE: [u8; MAX_FILE_SIZE] = [0; MAX_FILE_SIZE];
 static mut FILE_CACHE_INODE: u32 = 0;
 static mut FILE_CACHE_LEN: usize = 0;
+static mut MOUNT_CACHE: Option<Superblock> = None;
 static mut SMALL_FILE_CACHE: [u8; SMALL_FILE_CACHE_SIZE] = [0; SMALL_FILE_CACHE_SIZE];
 static mut SMALL_FILE_CACHE_INODE: u32 = 0;
 static mut SMALL_FILE_CACHE_LEN: usize = 0;
@@ -188,6 +189,12 @@ pub fn exists(path: &[u8]) -> bool {
 }
 
 fn mount() -> Option<Superblock> {
+    unsafe {
+        if let Some(fs) = MOUNT_CACHE {
+            return Some(fs);
+        }
+    }
+
     let mut sector = [0; block::SECTOR_SIZE];
     if !block::read_sector(0, &mut sector) {
         return None;
@@ -202,12 +209,16 @@ fn mount() -> Option<Superblock> {
     if block_size as usize != block::SECTOR_SIZE {
         return None;
     }
-    Some(Superblock {
+    let fs = Superblock {
         block_size,
         inode_count: read_u32(&sector, 16)?,
         inode_table_start: read_u32(&sector, 20)?,
         root_inode: read_u32(&sector, 32)?,
-    })
+    };
+    unsafe {
+        MOUNT_CACHE = Some(fs);
+    }
+    Some(fs)
 }
 
 fn resolve_path(fs: Superblock, path: &[u8]) -> Option<Inode> {

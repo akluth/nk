@@ -17,11 +17,7 @@ pub fn init() {
             BACKEND = Backend::Virtio;
             let mut sector = [0; SECTOR_SIZE];
             if read_sector(0, &mut sector) {
-                serial::write_str("nk: root block backend virtio-blk magic=");
-                for byte in &sector[..8] {
-                    serial::write_hex_u16(*byte as u16);
-                }
-                serial::write_line("");
+                serial::write_line("nk: root block backend virtio-blk");
                 return;
             }
             serial::write_line("nk: virtio-blk root probe failed");

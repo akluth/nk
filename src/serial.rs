@@ -45,6 +45,24 @@ pub fn write_dec_u8(value: u8) {
     write_log_byte(b'0' + value % 10);
 }
 
+pub fn write_dec_usize(mut value: usize) {
+    let mut digits = [0u8; 20];
+    let mut len = 0usize;
+    if value == 0 {
+        write_log_byte(b'0');
+        return;
+    }
+    while value > 0 && len < digits.len() {
+        digits[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    while len > 0 {
+        len -= 1;
+        write_log_byte(digits[len]);
+    }
+}
+
 pub fn write_str(text: &str) {
     for byte in text.bytes() {
         write_log_byte(byte);

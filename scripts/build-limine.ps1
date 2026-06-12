@@ -223,11 +223,8 @@ if ($Run) {
     }
 
     $AppDisk = Join-Path $Build "nk-root.nkfs"
-    $FallbackDiskPath = Join-Path $Build "nk-root-ata-fallback.nkfs"
-    Copy-Item $AppDisk $FallbackDiskPath -Force
     $RootDisk = "file=$AppDisk,format=raw,if=none,id=rootdisk"
-    $FallbackDisk = "file=$FallbackDiskPath,format=raw,if=ide,index=0,media=disk"
-    $QemuArgs = @("-M", "pc", "-m", "256M", "-boot", "d", "-cdrom", $Iso, "-drive", $RootDisk, "-device", "virtio-blk-pci,drive=rootdisk,disable-modern=on", "-drive", $FallbackDisk)
+    $QemuArgs = @("-M", "pc", "-m", "256M", "-boot", "d", "-cdrom", $Iso, "-drive", $RootDisk, "-device", "virtio-blk-pci,drive=rootdisk,disable-modern=on")
     if ($Uefi) {
         $FirmwareCandidates = @(
             "C:\Program Files\qemu\share\edk2-x86_64-code.fd",
@@ -237,7 +234,7 @@ if ($Run) {
         if (-not $Firmware) {
             throw "edk2-x86_64-code.fd wurde nicht gefunden."
         }
-        $QemuArgs = @("-M", "q35", "-m", "256M", "-drive", "if=pflash,format=raw,readonly=on,file=$Firmware", "-cdrom", $Iso, "-drive", $RootDisk, "-device", "virtio-blk-pci,drive=rootdisk,disable-modern=on", "-drive", $FallbackDisk)
+        $QemuArgs = @("-M", "q35", "-m", "256M", "-drive", "if=pflash,format=raw,readonly=on,file=$Firmware", "-cdrom", $Iso, "-drive", $RootDisk, "-device", "virtio-blk-pci,drive=rootdisk,disable-modern=on")
     }
 
     & $QemuPath @QemuArgs

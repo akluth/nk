@@ -10,7 +10,7 @@ const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
 const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3;
 const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
 
-const QUEUE_SIZE: u16 = 128;
+const QUEUE_SIZE: u16 = 256;
 const SECTOR_SIZE: usize = 512;
 
 const LEGACY_DEVICE_FEATURES: u16 = 0;
@@ -20,6 +20,7 @@ const LEGACY_QUEUE_NUM: u16 = 12;
 const LEGACY_QUEUE_SEL: u16 = 14;
 const LEGACY_QUEUE_NOTIFY: u16 = 16;
 const LEGACY_DEVICE_STATUS: u16 = 18;
+const LEGACY_ISR_STATUS: u16 = 19;
 
 const STATUS_ACKNOWLEDGE: u8 = 1;
 const STATUS_DRIVER: u8 = 2;
@@ -156,16 +157,16 @@ fn classify_device(device_id: u16) {
 
 #[repr(C, align(4096))]
 struct LegacyQueue {
-    bytes: [u8; 8192],
+    bytes: [u8; 16384],
 }
 
 impl LegacyQueue {
     const fn new() -> Self {
-        Self { bytes: [0; 8192] }
+        Self { bytes: [0; 16384] }
     }
 
     fn clear(&mut self) {
-        self.bytes = [0; 8192];
+        self.bytes = [0; 16384];
     }
 
     fn descriptors(&mut self) -> *mut Descriptor {
@@ -177,7 +178,7 @@ impl LegacyQueue {
     }
 
     fn used(&mut self) -> *mut UsedRing {
-        unsafe { self.bytes.as_mut_ptr().add(4096).cast() }
+        unsafe { self.bytes.as_mut_ptr().add(8192).cast() }
     }
 }
 
@@ -291,6 +292,7 @@ impl LegacyBlock {
             let used_idx = core::ptr::read_volatile(core::ptr::addr_of!((*used).idx));
             if used_idx != self.last_used {
                 self.last_used = used_idx;
+                let _ = arch::inb(self.io_base + LEGACY_ISR_STATUS);
                 if self.status == 0 {
                     out[..byte_len].copy_from_slice(&dma.bytes[..byte_len]);
                     return true;
@@ -351,6 +353,7 @@ fn try_init_legacy_block(device: pci::Device) {
             serial::write_line("nk: virtio legacy block queue phys missing");
             return;
         };
+        arch::outl(io_base + LEGACY_QUEUE_PFN, 0);
         arch::outl(io_base + LEGACY_QUEUE_PFN, (queue_phys >> 12) as u32);
         arch::outb(
             io_base + LEGACY_DEVICE_STATUS,
@@ -362,6 +365,8 @@ fn try_init_legacy_block(device: pci::Device) {
         BLOCK.last_used = 0;
         serial::write_str("nk: virtio legacy block ready io=");
         serial::write_hex_u16(io_base);
+        serial::write_str(" q=");
+        serial::write_hex_u16(queue_size);
         serial::write_line("");
     }
 }

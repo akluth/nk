@@ -122,7 +122,17 @@ mod microkernel {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    serial::write_line("nk: KERNEL PANIC");
+    if let Some(location) = info.location() {
+        serial::write_str("nk: panic at ");
+        serial::write_str(location.file());
+        serial::write_str(":");
+        serial::write_dec_usize(location.line() as usize);
+        serial::write_str(":");
+        serial::write_dec_usize(location.column() as usize);
+        serial::write_line("");
+    }
     loop {
         arch::halt();
     }

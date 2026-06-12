@@ -141,10 +141,9 @@ Windows:
 .\scripts\build-limine.ps1 -Run
 ```
 
-The BIOS run path uses QEMU's `pc` machine. It attaches the nkfs root disk as a
-Virtio block device first and a separate ATA PIO fallback copy second. The
-kernel probes Virtio first and falls back to ATA if the early Virtio queue does
-not complete a request yet.
+The BIOS run path uses QEMU's `pc` machine and attaches the nkfs root disk as a
+Virtio block device. The kernel can still fall back to ATA PIO when booted with
+an older manual QEMU command, but the standard run path is Virtio-only.
 
 UEFI test with edk2/OVMF from the QEMU installation:
 
@@ -212,7 +211,10 @@ Already done:
   screen redraw on every character.
 - Early PCI/Virtio discovery and queue-memory scaffolding.
 - A root block-device layer in front of nkfs, with Virtio block probing,
-  bounded fallback to ATA PIO, and no boot-time Coreutils image preload.
+  ATA PIO fallback support, no boot-time Coreutils image preload, and cached
+  nkfs superblock state after mount.
+- Kernel panic diagnostics are printed to serial and the framebuffer boot log
+  instead of silently halting.
 
 Still useful next:
 
@@ -224,8 +226,8 @@ Still useful next:
 - Move from the current framebuffer console path toward a proper TTY/console
   subsystem so Bash can become the default shell again without special cases.
 - Add writable filesystem support or a second writable layer on top of nkfs.
-- Complete the Virtio block request path so the root disk no longer needs the
-  ATA fallback copy.
+- Move the Virtio block path from polled legacy I/O toward a modern
+  interrupt-driven driver with proper queue ownership and request objects.
 - Complete Virtio input drivers beyond discovery and queue setup.
 - Give GUI applications private window buffers and route them through a real
   compositor/window manager instead of shared framebuffer drawing.
