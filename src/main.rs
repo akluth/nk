@@ -63,9 +63,10 @@ mod microkernel {
                 .publish(ipc::Message::new("kernel", "desktop", "paint"));
 
             let mut framebuffer_mapping = None;
+            let hhdm_offset = limine::hhdm_offset();
             if let Some(fb) = limine::framebuffer() {
                 serial::write_line("nk: framebuffer found");
-                if let Some(hhdm_offset) = limine::hhdm_offset() {
+                if let Some(hhdm_offset) = hhdm_offset {
                     framebuffer_mapping = Some(memory::FramebufferMapping {
                         virt: fb.address(),
                         phys: fb.address() - hhdm_offset,
@@ -81,12 +82,15 @@ mod microkernel {
             serial::write_line("nk: interrupts enabled");
             userland::init();
             let mut can_enter_user = false;
-            if let Some(kernel_address) = limine::kernel_address() {
-                let roots = memory::create_user_address_spaces(kernel_address, framebuffer_mapping);
+            if let (Some(kernel_address), Some(hhdm_offset)) =
+                (limine::kernel_address(), hhdm_offset)
+            {
+                let roots =
+                    memory::create_user_address_spaces(kernel_address, hhdm_offset, framebuffer_mapping);
                 userland::install_page_table_roots(roots);
                 can_enter_user = true;
             } else {
-                serial::write_line("nk: no kernel address response");
+                serial::write_line("nk: no kernel address or hhdm response");
             }
             userland::smoke_test_syscall();
             virtio::init();

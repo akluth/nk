@@ -814,7 +814,11 @@ fn native_console_write(ptr: *const u8, len: usize) {
     if ptr.is_null() || len > 4096 {
         return;
     }
-    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+    let mut buffer = [0u8; 4096];
+    if !copy_current_user_bytes(ptr, len, &mut buffer) {
+        return;
+    }
+    let bytes = &buffer[..len];
     for byte in bytes {
         serial::write_str_byte(*byte);
     }
@@ -825,10 +829,26 @@ fn native_path<'a>(ptr: *const u8, len: usize, out: &'a mut [u8; 256]) -> Option
     if ptr.is_null() || len == 0 || len > out.len() {
         return None;
     }
-    unsafe {
-        core::ptr::copy_nonoverlapping(ptr, out.as_mut_ptr(), len);
+    if !copy_current_user_bytes(ptr, len, out) {
+        return None;
     }
     Some(&out[..len])
+}
+
+fn copy_current_user_bytes(ptr: *const u8, len: usize, out: &mut [u8]) -> bool {
+    if len > out.len() {
+        return false;
+    }
+    let Some(user_pml4) = scheduler::current_user_pml4() else {
+        return false;
+    };
+    unsafe {
+        let current = arch::read_cr3();
+        arch::load_cr3(user_pml4);
+        core::ptr::copy_nonoverlapping(ptr, out.as_mut_ptr(), len);
+        arch::load_cr3(current);
+    }
+    true
 }
 
 fn native_list_dir(ptr: *const u8, len: usize) -> bool {

@@ -71,7 +71,7 @@ impl Shell {
                 byte if byte >= 0x20 && self.line_len < LINE_CAP - 1 => {
                     self.line[self.line_len] = byte;
                     self.line_len += 1;
-                    self.write(&[byte]);
+                    self.write(&self.line[self.line_len - 1..self.line_len]);
                 }
                 _ => {}
             }

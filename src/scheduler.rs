@@ -427,6 +427,19 @@ impl UserScheduler {
         }
     }
 
+    fn current_pml4(&self) -> Option<u64> {
+        if self.installed == 0 {
+            None
+        } else {
+            let pml4 = self.tasks[self.current].pml4_phys;
+            if pml4 == 0 {
+                None
+            } else {
+                Some(pml4)
+            }
+        }
+    }
+
     fn exit_current(&mut self, frame: &mut TrapFrame, status: i32) -> Option<u64> {
         if self.installed == 0 {
             return None;
@@ -777,6 +790,10 @@ pub fn current_user_pid() -> Option<u64> {
 
 pub fn current_user_parent_pid() -> Option<u64> {
     unsafe { (*USER_SCHEDULER.0.get()).current_parent_pid() }
+}
+
+pub fn current_user_pml4() -> Option<u64> {
+    unsafe { (*USER_SCHEDULER.0.get()).current_pml4() }
 }
 
 pub fn exit_current_user(frame: &mut TrapFrame, status: i32) -> Option<u64> {

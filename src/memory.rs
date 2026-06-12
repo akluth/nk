@@ -1,25 +1,34 @@
 use core::cell::UnsafeCell;
 
-use crate::{limine::KernelAddress, scheduler::USER_TASKS, serial};
+use crate::{
+    limine::{self, KernelAddress},
+    scheduler::USER_TASKS,
+    serial,
+};
 
 const PAGE_SIZE: u64 = 4096;
 const PAGE_ENTRIES: usize = 512;
 const USER_IMAGE_PT_COUNT: usize = (USER_IMAGE_PAGES + PAGE_ENTRIES - 1) / PAGE_ENTRIES;
 const USER_STACK_PT_COUNT: usize = 1;
-const TABLES_PER_TASK: usize = 320;
-const TABLE_COUNT: usize = TABLES_PER_TASK * USER_TASKS;
 const KERNEL_MAPPED_PAGES: usize = 131072;
 const KERNEL_PT_COUNT: usize = (KERNEL_MAPPED_PAGES + PAGE_ENTRIES - 1) / PAGE_ENTRIES + 1;
+const FRAMEBUFFER_PT_COUNT: usize = 16;
+const HHDM_HIGH_BASE: u64 = 0xf000_0000;
+const HHDM_HIGH_LEN: u64 = 0x1000_0000;
+const TABLES_PER_TASK: usize = 800;
+const TABLE_COUNT: usize = TABLES_PER_TASK * USER_TASKS;
 pub const USER_IMAGE_BASE: u64 = 0x0000_0000_4000_0000;
 pub const USER_IMAGE_SIZE: usize = 32 * 1024 * 1024;
 pub const USER_IMAGE_PAGES: usize = USER_IMAGE_SIZE / PAGE_SIZE as usize;
 pub const USER_STACK_BASE: u64 = 0x0000_0000_4200_0000;
 pub const USER_STACK_SIZE: usize = 16 * 1024;
 const USER_STACK_PAGES: usize = USER_STACK_SIZE / PAGE_SIZE as usize;
-const USER_STACK_LOW_SIZE: usize = 256 * 1024;
+const USER_STACK_LOW_SIZE: usize = 1024 * 1024;
 const USER_STACK_LOW_BASE: u64 = USER_STACK_BASE - USER_STACK_LOW_SIZE as u64;
-const USER_POOL_PAGES: usize = (USER_IMAGE_PAGES + USER_STACK_PAGES) * USER_TASKS;
-const OWNER_FREE: u8 = 0;
+const MAX_FREE_FRAMES: usize = 65536;
+const FRAME_NONE: u64 = 0;
+const LIMINE_MEMMAP_USABLE: u64 = 0;
+const MAPPED_PHYS_LIMIT: u64 = (KERNEL_MAPPED_PAGES as u64) * PAGE_SIZE;
 
 const PTE_PRESENT: u64 = 1 << 0;
 const PTE_WRITABLE: u64 = 1 << 1;
@@ -64,37 +73,11 @@ pub struct FramebufferMapping {
     pub len: u64,
 }
 
-#[repr(align(4096))]
-#[derive(Clone, Copy)]
-struct UserPage {
-    bytes: [u8; PAGE_SIZE as usize],
-}
-
-impl UserPage {
-    const fn empty() -> Self {
-        Self {
-            bytes: [0; PAGE_SIZE as usize],
-        }
-    }
-}
-
-#[repr(align(4096))]
-struct UserPagePool {
-    pages: [UserPage; USER_POOL_PAGES],
-}
-
-impl UserPagePool {
-    const fn empty() -> Self {
-        Self {
-            pages: [UserPage::empty(); USER_POOL_PAGES],
-        }
-    }
-}
-
-static mut USER_POOL: UserPagePool = UserPagePool::empty();
-static mut USER_PAGE_OWNERS: [u8; USER_POOL_PAGES] = [OWNER_FREE; USER_POOL_PAGES];
-static mut USER_VIRT_TO_POOL: [[u16; USER_IMAGE_PAGES + USER_STACK_PAGES]; USER_TASKS] =
-    [[u16::MAX; USER_IMAGE_PAGES + USER_STACK_PAGES]; USER_TASKS];
+static mut FREE_FRAMES: [u64; MAX_FREE_FRAMES] = [0; MAX_FREE_FRAMES];
+static mut FREE_FRAME_COUNT: usize = 0;
+static mut HHDM_OFFSET: u64 = 0;
+static mut USER_VIRT_TO_PHYS: [[u64; USER_IMAGE_PAGES + USER_STACK_PAGES]; USER_TASKS] =
+    [[FRAME_NONE; USER_IMAGE_PAGES + USER_STACK_PAGES]; USER_TASKS];
 static mut KERNEL_ADDRESS: KernelAddress = KernelAddress {
     physical_base: 0,
     virtual_base: 0,
@@ -102,16 +85,16 @@ static mut KERNEL_ADDRESS: KernelAddress = KernelAddress {
 
 pub fn create_user_address_spaces(
     kernel: KernelAddress,
+    hhdm_offset: u64,
     framebuffer: Option<FramebufferMapping>,
 ) -> [Option<PageTableRoot>; USER_TASKS] {
     unsafe {
         KERNEL_ADDRESS = kernel;
-        for index in 0..USER_POOL_PAGES {
-            USER_PAGE_OWNERS[index] = OWNER_FREE;
-        }
+        HHDM_OFFSET = hhdm_offset;
+        init_frame_allocator();
         for task in 0..USER_TASKS {
             for page in 0..USER_IMAGE_PAGES + USER_STACK_PAGES {
-                USER_VIRT_TO_POOL[task][page] = u16::MAX;
+                USER_VIRT_TO_PHYS[task][page] = FRAME_NONE;
             }
         }
     }
@@ -128,6 +111,34 @@ pub fn create_user_address_spaces(
         create_user_address_space(2, kernel, framebuffer),
         create_user_address_space(3, kernel, framebuffer),
     ]
+}
+
+unsafe fn init_frame_allocator() {
+    FREE_FRAME_COUNT = 0;
+    let regions = limine::memory_region_count();
+    for region_index in 0..regions {
+        let Some(region) = limine::memory_region(region_index) else {
+            continue;
+        };
+        if region.kind != LIMINE_MEMMAP_USABLE {
+            continue;
+        }
+        let mut frame = align_up_u64(region.base.max(0x0010_0000), PAGE_SIZE);
+        let end = (region.base.saturating_add(region.length) & !(PAGE_SIZE - 1))
+            .min(MAPPED_PHYS_LIMIT);
+        while frame < end && FREE_FRAME_COUNT < MAX_FREE_FRAMES {
+            FREE_FRAMES[FREE_FRAME_COUNT] = frame;
+            FREE_FRAME_COUNT += 1;
+            frame += PAGE_SIZE;
+        }
+    }
+    serial::write_str("nk: physical frame allocator ready, frames=");
+    serial::write_dec_u8((FREE_FRAME_COUNT.min(255)) as u8);
+    serial::write_line("+");
+}
+
+const fn align_up_u64(value: u64, align: u64) -> u64 {
+    (value + align - 1) & !(align - 1)
 }
 
 fn create_user_address_space(
@@ -154,6 +165,11 @@ fn create_user_address_space(
         let framebuffer_pdpt = kernel_pts + KERNEL_PT_COUNT;
         let framebuffer_pd = framebuffer_pdpt + 1;
         let framebuffer_pts = framebuffer_pd + 1;
+        let hhdm_pdpt = framebuffer_pts + FRAMEBUFFER_PT_COUNT;
+        let hhdm_pd = hhdm_pdpt + 1;
+        let hhdm_pts = hhdm_pd + 1;
+        let hhdm_high_pd = hhdm_pts + KERNEL_PT_COUNT;
+        let hhdm_high_pts = hhdm_high_pd + 1;
 
         link_table(tables, kernel, pml4, 0, pdpt, PTE_USER);
         link_table(tables, kernel, pdpt, 1, user_pd, PTE_USER);
@@ -211,6 +227,31 @@ fn create_user_address_space(
                 PTE_NO_EXECUTE,
             );
         }
+
+        map_range(
+            tables,
+            kernel,
+            pml4,
+            hhdm_pdpt,
+            hhdm_pd,
+            hhdm_pts,
+            HHDM_OFFSET,
+            0,
+            (KERNEL_MAPPED_PAGES as u64) * PAGE_SIZE,
+            PTE_NO_EXECUTE,
+        );
+        map_range(
+            tables,
+            kernel,
+            pml4,
+            hhdm_pdpt,
+            hhdm_high_pd,
+            hhdm_high_pts,
+            HHDM_OFFSET + HHDM_HIGH_BASE,
+            HHDM_HIGH_BASE,
+            HHDM_HIGH_LEN,
+            PTE_NO_EXECUTE,
+        );
 
         let _ = PAGE_SIZE;
         serial::write_str("nk: user page tables created for task ");
@@ -318,17 +359,12 @@ pub fn clear_user_image(index: usize) -> bool {
 }
 
 unsafe fn free_task_pages(index: usize) {
-    let owner = (index as u8) + 1;
-    for page_index in 0..USER_POOL_PAGES {
-        if USER_PAGE_OWNERS[page_index] == owner {
-            USER_PAGE_OWNERS[page_index] = OWNER_FREE;
-            for byte in &mut USER_POOL.pages[page_index].bytes {
-                *byte = 0;
-            }
-        }
-    }
     for page in 0..USER_IMAGE_PAGES + USER_STACK_PAGES {
-        USER_VIRT_TO_POOL[index][page] = u16::MAX;
+        let frame = USER_VIRT_TO_PHYS[index][page];
+        if frame != FRAME_NONE {
+            USER_VIRT_TO_PHYS[index][page] = FRAME_NONE;
+            free_frame(frame);
+        }
     }
 }
 
@@ -344,18 +380,35 @@ unsafe fn clear_user_mappings(index: usize) {
     tables[stack_pt].clear();
 }
 
-unsafe fn alloc_pool_page(owner: usize) -> Option<usize> {
-    let owner = (owner as u8) + 1;
-    for page_index in 0..USER_POOL_PAGES {
-        if USER_PAGE_OWNERS[page_index] == OWNER_FREE {
-            USER_PAGE_OWNERS[page_index] = owner;
-            for byte in &mut USER_POOL.pages[page_index].bytes {
-                *byte = 0;
-            }
-            return Some(page_index);
+unsafe fn alloc_frame() -> Option<u64> {
+    while FREE_FRAME_COUNT > 0 {
+        FREE_FRAME_COUNT -= 1;
+        let frame = FREE_FRAMES[FREE_FRAME_COUNT];
+        if frame == 0 || frame >= MAPPED_PHYS_LIMIT {
+            continue;
         }
+        zero_frame(frame);
+        return Some(frame);
     }
     None
+}
+
+unsafe fn free_frame(frame: u64) {
+    if frame != 0 && frame < MAPPED_PHYS_LIMIT && FREE_FRAME_COUNT < MAX_FREE_FRAMES {
+        zero_frame(frame);
+        FREE_FRAMES[FREE_FRAME_COUNT] = frame;
+        FREE_FRAME_COUNT += 1;
+    }
+}
+
+unsafe fn zero_frame(frame: u64) {
+    for byte in frame_bytes_mut(frame) {
+        *byte = 0;
+    }
+}
+
+unsafe fn frame_bytes_mut(frame: u64) -> &'static mut [u8; PAGE_SIZE as usize] {
+    &mut *((frame + HHDM_OFFSET) as *mut [u8; PAGE_SIZE as usize])
 }
 
 fn user_page_index(virt: u64) -> Option<usize> {
@@ -370,7 +423,7 @@ fn user_page_index(virt: u64) -> Option<usize> {
     }
 }
 
-unsafe fn map_user_pool_page(index: usize, virt_page: usize, pool_page: usize, extra_flags: u64) {
+unsafe fn map_user_frame(index: usize, virt_page: usize, frame: u64, extra_flags: u64) {
     let tables = &mut *PAGE_TABLES.0.get();
     let table_base = index * TABLES_PER_TASK;
     let user_pts = table_base + 3;
@@ -381,25 +434,21 @@ unsafe fn map_user_pool_page(index: usize, virt_page: usize, pool_page: usize, e
         let stack_page = virt_page - USER_IMAGE_PAGES;
         (stack_pt, stack_page)
     };
-    let phys = virt_to_phys(
-        core::ptr::addr_of!(USER_POOL.pages[pool_page]) as u64,
-        KERNEL_ADDRESS,
-    );
-    map_page(tables, table, entry, phys, PTE_USER | extra_flags);
-    USER_VIRT_TO_POOL[index][virt_page] = pool_page as u16;
+    map_page(tables, table, entry, frame, PTE_USER | extra_flags);
+    USER_VIRT_TO_PHYS[index][virt_page] = frame;
 }
 
 unsafe fn ensure_user_page(index: usize, virt_page: usize, extra_flags: u64) -> Option<usize> {
     if index >= USER_TASKS || virt_page >= USER_IMAGE_PAGES + USER_STACK_PAGES {
         return None;
     }
-    let existing = USER_VIRT_TO_POOL[index][virt_page];
-    if existing != u16::MAX {
+    let existing = USER_VIRT_TO_PHYS[index][virt_page];
+    if existing != FRAME_NONE {
         return Some(existing as usize);
     }
-    let pool_page = alloc_pool_page(index)?;
-    map_user_pool_page(index, virt_page, pool_page, extra_flags);
-    Some(pool_page)
+    let frame = alloc_frame()?;
+    map_user_frame(index, virt_page, frame, extra_flags);
+    Some(frame as usize)
 }
 
 pub fn allocate_user_range(index: usize, virt: u64, len: usize, no_execute: bool) -> bool {
@@ -452,7 +501,7 @@ pub fn user_range_mapped(index: usize, virt: u64, len: usize) -> bool {
             let Some(virt_page) = user_page_index(page) else {
                 return false;
             };
-            if USER_VIRT_TO_POOL[index][virt_page] == u16::MAX {
+            if USER_VIRT_TO_PHYS[index][virt_page] == FRAME_NONE {
                 return false;
             }
             page += PAGE_SIZE;
@@ -483,19 +532,18 @@ pub fn copy_user_segment(index: usize, virt: u64, data: &[u8], mem_size: usize) 
             let Some(virt_page) = user_page_index(target) else {
                 return false;
             };
-            let Some(pool_page) = ensure_user_page(index, virt_page, 0) else {
+            let Some(frame) = ensure_user_page(index, virt_page, 0) else {
                 return false;
             };
             let page_offset = (target as usize) & (PAGE_SIZE as usize - 1);
             let count = (mem_size - relative).min(PAGE_SIZE as usize - page_offset);
             let copy_count = count.min(data.len().saturating_sub(relative));
+            let page = frame_bytes_mut(frame as u64);
             if copy_count > 0 {
-                USER_POOL.pages[pool_page].bytes[page_offset..page_offset + copy_count]
+                page[page_offset..page_offset + copy_count]
                     .copy_from_slice(&data[relative..relative + copy_count]);
             }
-            for byte in &mut USER_POOL.pages[pool_page].bytes
-                [page_offset + copy_count..page_offset + count]
-            {
+            for byte in &mut page[page_offset + copy_count..page_offset + count] {
                 *byte = 0;
             }
             relative += count;
@@ -514,20 +562,21 @@ pub fn copy_user_space(source: usize, target: usize) -> bool {
         free_task_pages(target);
         clear_user_mappings(target);
         for virt_page in 0..USER_IMAGE_PAGES + USER_STACK_PAGES {
-            let source_pool = USER_VIRT_TO_POOL[source][virt_page];
-            if source_pool == u16::MAX {
+            let source_frame = USER_VIRT_TO_PHYS[source][virt_page];
+            if source_frame == FRAME_NONE {
                 continue;
             }
-            let Some(target_pool) = alloc_pool_page(target) else {
+            let Some(target_frame) = alloc_frame() else {
                 return false;
             };
-            USER_POOL.pages[target_pool] = USER_POOL.pages[source_pool as usize];
+            let source_bytes = *frame_bytes_mut(source_frame);
+            *frame_bytes_mut(target_frame) = source_bytes;
             let flags = if virt_page >= USER_IMAGE_PAGES {
                 PTE_NO_EXECUTE
             } else {
                 0
             };
-            map_user_pool_page(target, virt_page, target_pool, flags);
+            map_user_frame(target, virt_page, target_frame, flags);
         }
     }
 
@@ -552,11 +601,11 @@ pub fn write_user_stack(index: usize, offset: usize, data: &[u8]) -> bool {
             let Some(virt_page) = user_page_index(virt) else {
                 return false;
             };
-            let Some(pool_page) = ensure_user_page(index, virt_page, PTE_NO_EXECUTE) else {
+            let Some(frame) = ensure_user_page(index, virt_page, PTE_NO_EXECUTE) else {
                 return false;
             };
             let page_offset = stack_offset & (PAGE_SIZE as usize - 1);
-            USER_POOL.pages[pool_page].bytes[page_offset] = *byte;
+            frame_bytes_mut(frame as u64)[page_offset] = *byte;
         }
     }
 
@@ -571,13 +620,10 @@ pub fn clear_user_stack(index: usize) -> bool {
         free_user_range(index, USER_STACK_LOW_BASE, USER_STACK_LOW_SIZE);
         for page in 0..USER_STACK_PAGES {
             let virt_page = USER_IMAGE_PAGES + page;
-            let existing = USER_VIRT_TO_POOL[index][virt_page];
-            if existing != u16::MAX {
-                USER_PAGE_OWNERS[existing as usize] = OWNER_FREE;
-                for byte in &mut USER_POOL.pages[existing as usize].bytes {
-                    *byte = 0;
-                }
-                USER_VIRT_TO_POOL[index][virt_page] = u16::MAX;
+            let existing = USER_VIRT_TO_PHYS[index][virt_page];
+            if existing != FRAME_NONE {
+                USER_VIRT_TO_PHYS[index][virt_page] = FRAME_NONE;
+                free_frame(existing);
             }
         }
         let tables = &mut *PAGE_TABLES.0.get();
@@ -596,13 +642,10 @@ unsafe fn free_user_range(index: usize, virt: u64, len: usize) {
     let last = (end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     while page < last {
         if let Some(virt_page) = user_page_index(page) {
-            let existing = USER_VIRT_TO_POOL[index][virt_page];
-            if existing != u16::MAX {
-                USER_PAGE_OWNERS[existing as usize] = OWNER_FREE;
-                for byte in &mut USER_POOL.pages[existing as usize].bytes {
-                    *byte = 0;
-                }
-                USER_VIRT_TO_POOL[index][virt_page] = u16::MAX;
+            let existing = USER_VIRT_TO_PHYS[index][virt_page];
+            if existing != FRAME_NONE {
+                USER_VIRT_TO_PHYS[index][virt_page] = FRAME_NONE;
+                free_frame(existing);
                 let tables = &mut *PAGE_TABLES.0.get();
                 let user_pts = index * TABLES_PER_TASK + 3;
                 let table = user_pts + virt_page / PAGE_ENTRIES;

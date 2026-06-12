@@ -28,6 +28,13 @@ struct HhdmRequest {
 }
 
 #[repr(C)]
+struct MemmapRequest {
+    id: [u64; 4],
+    revision: u64,
+    response: *const MemmapResponse,
+}
+
+#[repr(C)]
 struct KernelAddressResponse {
     revision: u64,
     physical_base: u64,
@@ -38,6 +45,27 @@ struct KernelAddressResponse {
 struct HhdmResponse {
     revision: u64,
     offset: u64,
+}
+
+#[repr(C)]
+struct MemmapResponse {
+    revision: u64,
+    entry_count: u64,
+    entries: *const *const LimineMemmapEntry,
+}
+
+#[repr(C)]
+struct LimineMemmapEntry {
+    base: u64,
+    length: u64,
+    kind: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct MemoryRegion {
+    pub base: u64,
+    pub length: u64,
+    pub kind: u64,
 }
 
 #[repr(C)]
@@ -121,6 +149,19 @@ static mut HHDM_REQUEST: HhdmRequest = HhdmRequest {
 };
 
 #[used]
+#[link_section = ".limine_requests"]
+static mut MEMMAP_REQUEST: MemmapRequest = MemmapRequest {
+    id: [
+        0xc7b1dd30df4c8b88,
+        0x0a82e883a194f07b,
+        0x67cf3d9d378a806f,
+        0xe304acdfc50c3c62,
+    ],
+    revision: 0,
+    response: core::ptr::null(),
+};
+
+#[used]
 #[link_section = ".limine_requests_end"]
 static LIMINE_REQUESTS_END: [u64; 2] = [0xadc0e0531bb10d03, 0x9572709f31764c62];
 
@@ -169,5 +210,34 @@ pub fn hhdm_offset() -> Option<u64> {
                 .as_ref()?
                 .offset,
         )
+    }
+}
+
+pub fn memory_region_count() -> usize {
+    unsafe {
+        core::ptr::addr_of!(MEMMAP_REQUEST)
+            .as_ref()
+            .and_then(|request| request.response.as_ref())
+            .map(|response| response.entry_count as usize)
+            .unwrap_or(0)
+    }
+}
+
+pub fn memory_region(index: usize) -> Option<MemoryRegion> {
+    unsafe {
+        let response = core::ptr::addr_of!(MEMMAP_REQUEST)
+            .as_ref()?
+            .response
+            .as_ref()?;
+        if index >= response.entry_count as usize {
+            return None;
+        }
+        let raw = *response.entries.add(index);
+        let entry = raw.as_ref()?;
+        Some(MemoryRegion {
+            base: entry.base,
+            length: entry.length,
+            kind: entry.kind,
+        })
     }
 }
