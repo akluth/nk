@@ -75,7 +75,10 @@ pub fn read_file(path: &[u8]) -> Option<&'static [u8]> {
     }
 
     let (out, out_len) = if inode.size <= SMALL_FILE_CACHE_SIZE {
-        (ptr::addr_of_mut!(SMALL_FILE_CACHE).cast(), SMALL_FILE_CACHE_SIZE)
+        (
+            ptr::addr_of_mut!(SMALL_FILE_CACHE).cast(),
+            SMALL_FILE_CACHE_SIZE,
+        )
     } else {
         (ptr::addr_of_mut!(FILE_CACHE).cast(), MAX_FILE_SIZE)
     };
@@ -311,8 +314,11 @@ fn read_extent(start_block: u32, size: usize, out: *mut u8, out_len: usize) -> O
         let buffer = unsafe {
             core::slice::from_raw_parts_mut(ptr::addr_of_mut!(EXTENT_BUFFER).cast(), chunk_bytes)
         };
-        if !ata::read_sectors(start_block + (written / ata::SECTOR_SIZE) as u32, chunk_sectors, buffer)
-        {
+        if !ata::read_sectors(
+            start_block + (written / ata::SECTOR_SIZE) as u32,
+            chunk_sectors,
+            buffer,
+        ) {
             return None;
         }
         let count = (size - written).min(chunk_bytes);

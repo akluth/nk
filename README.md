@@ -194,6 +194,9 @@ Already done:
   and terminal syscalls to run useful static userland tools.
 - Minimal `fork`/`execve`/`wait4` support so the shell can launch external
   programs on demand.
+- Dynamic PID allocation on top of the current fixed backing slots, including
+  parent PID tracking, PID-specific `wait4`, zombie reaping, and per-task Linux
+  ABI state for CWD, file descriptors, `brk`, `mmap`, and stdout limiting.
 - PS/2 keyboard and mouse IRQ paths with small user-facing input syscalls.
 - A dynamically loaded Spleen 12x24 PSF2 font at `/etc/font.psf`.
 - A framebuffer terminal with incremental row/cell redraws instead of full
@@ -202,11 +205,8 @@ Already done:
 
 Still useful next:
 
-- Turn the fixed task slots into a real process table with dynamic PID
-  allocation, parent/child relationships, robust reaping, and multiple
-  simultaneous children.
-- Replace the fixed user image buffers with real per-process virtual memory
-  objects and page allocation.
+- Replace the remaining fixed backing slots with a real growable process table
+  backed by per-process virtual memory objects and page allocation.
 - Expand the Linux/POSIX ABI with pipes, descriptor duplication, `poll`/`select`,
   signals, termios/TTY handling, process groups, and job-control semantics.
 - Add proper argv/envp/auxv setup for Linux ABI program startup.

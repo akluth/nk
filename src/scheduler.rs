@@ -48,6 +48,8 @@ pub enum UserAbi {
 #[derive(Clone, Copy)]
 struct UserTask {
     name: &'static str,
+    pid: u64,
+    parent_pid: u64,
     abi: UserAbi,
     pml4_phys: u64,
     initial_frame: TrapFrame,
@@ -58,6 +60,7 @@ struct UserTask {
     waiting_stdin: bool,
     stdin_buffer: u64,
     waiting_child: bool,
+    wait_pid: i32,
     wait_status: u64,
     zombie: bool,
     exit_status: i32,
@@ -90,6 +93,8 @@ impl UserTask {
     const fn empty() -> Self {
         Self {
             name: "",
+            pid: 0,
+            parent_pid: 0,
             abi: UserAbi::Native,
             pml4_phys: 0,
             initial_frame: Self::EMPTY_FRAME,
@@ -100,6 +105,7 @@ impl UserTask {
             waiting_stdin: false,
             stdin_buffer: 0,
             waiting_child: false,
+            wait_pid: 0,
             wait_status: 0,
             zombie: false,
             exit_status: 0,
@@ -129,6 +135,7 @@ struct UserScheduler {
     current: usize,
     installed: usize,
     focus: usize,
+    next_pid: u64,
 }
 
 pub struct UserTaskSnapshot {
@@ -144,7 +151,14 @@ impl UserScheduler {
             current: 0,
             installed: 0,
             focus: 0,
+            next_pid: 2,
         }
+    }
+
+    fn alloc_pid(&mut self) -> u64 {
+        let pid = self.next_pid;
+        self.next_pid = self.next_pid.wrapping_add(1).max(2);
+        pid
     }
 
     fn install(
@@ -159,8 +173,15 @@ impl UserScheduler {
             return;
         }
 
+        let parent_pid = if index == 0 {
+            0
+        } else {
+            self.current_pid().unwrap_or(0)
+        };
         self.tasks[index] = UserTask {
             name,
+            pid: if index == 0 { 1 } else { self.alloc_pid() },
+            parent_pid,
             abi,
             pml4_phys,
             initial_frame: frame,
@@ -171,6 +192,7 @@ impl UserScheduler {
             waiting_stdin: false,
             stdin_buffer: 0,
             waiting_child: false,
+            wait_pid: 0,
             wait_status: 0,
             zombie: false,
             exit_status: 0,
@@ -192,9 +214,22 @@ impl UserScheduler {
         self.tasks[index].waiting_stdin = false;
         self.tasks[index].stdin_buffer = 0;
         self.tasks[index].waiting_child = false;
+        self.tasks[index].wait_pid = 0;
         self.tasks[index].wait_status = 0;
         self.tasks[index].zombie = false;
         self.tasks[index].exit_status = 0;
+    }
+
+    fn allocate_child_slot(&self) -> Option<usize> {
+        for index in 0..USER_TASKS {
+            let task = self.tasks[index];
+            if task.pid == 0
+                || (!task.active && !task.waiting_stdin && !task.waiting_child && !task.zombie)
+            {
+                return Some(index);
+            }
+        }
+        None
     }
 
     fn schedule(&mut self, frame: &mut TrapFrame) -> Option<UserSwitch> {
@@ -257,6 +292,7 @@ impl UserScheduler {
     fn block_current_for_child(
         &mut self,
         frame: &mut TrapFrame,
+        wait_pid: i32,
         wait_status: u64,
     ) -> Option<UserSwitch> {
         if self.installed < 2 || frame.cs & 0x3 != 0x3 {
@@ -269,6 +305,7 @@ impl UserScheduler {
         self.save_fs_base(current);
         self.tasks[current].active = false;
         self.tasks[current].waiting_child = true;
+        self.tasks[current].wait_pid = wait_pid;
         self.tasks[current].wait_status = wait_status;
         self.current = next;
         self.restore_fs_base(self.current);
@@ -300,8 +337,12 @@ impl UserScheduler {
         }
 
         self.save_fs_base(self.current);
+        let parent_pid = self.tasks[self.current].pid;
+        let child_pid = self.alloc_pid();
         let mut child_task = self.tasks[self.current];
         child_task.name = "child";
+        child_task.pid = child_pid;
+        child_task.parent_pid = parent_pid;
         child_task.pml4_phys = child_pml4;
         child_task.frame = *frame;
         child_task.frame.rax = 0;
@@ -310,12 +351,13 @@ impl UserScheduler {
         child_task.waiting_stdin = false;
         child_task.stdin_buffer = 0;
         child_task.waiting_child = false;
+        child_task.wait_pid = 0;
         child_task.wait_status = 0;
         child_task.zombie = false;
         child_task.exit_status = 0;
         self.tasks[child] = child_task;
         self.installed = self.installed.max(child + 1);
-        Some((child + 1) as u64)
+        Some(child_pid)
     }
 
     fn first_frame(&self) -> Option<TrapFrame> {
@@ -359,28 +401,64 @@ impl UserScheduler {
         }
     }
 
-    fn exit_current(&mut self, frame: &mut TrapFrame) -> Option<u64> {
+    fn current_pid(&self) -> Option<u64> {
+        if self.installed == 0 {
+            None
+        } else {
+            let pid = self.tasks[self.current].pid;
+            if pid == 0 {
+                None
+            } else {
+                Some(pid)
+            }
+        }
+    }
+
+    fn current_parent_pid(&self) -> Option<u64> {
+        if self.installed == 0 {
+            None
+        } else {
+            let task = self.tasks[self.current];
+            if task.pid == 0 {
+                None
+            } else {
+                Some(task.parent_pid)
+            }
+        }
+    }
+
+    fn exit_current(&mut self, frame: &mut TrapFrame, status: i32) -> Option<u64> {
         if self.installed == 0 {
             return None;
         }
 
         let exiting = self.current;
+        let exiting_pid = self.tasks[exiting].pid;
+        let parent_pid = self.tasks[exiting].parent_pid;
         self.save_fs_base(exiting);
         self.tasks[exiting].active = false;
         self.tasks[exiting].waiting_stdin = false;
         self.tasks[exiting].stdin_buffer = 0;
         self.tasks[exiting].waiting_child = false;
+        self.tasks[exiting].wait_pid = 0;
         self.tasks[exiting].wait_status = 0;
         self.tasks[exiting].zombie = true;
-        self.tasks[exiting].exit_status = 0;
+        self.tasks[exiting].exit_status = status;
 
         let mut awakened_parent = None;
         for parent in 0..self.installed {
-            if self.tasks[parent].waiting_child {
+            if self.tasks[parent].pid == parent_pid
+                && self.tasks[parent].waiting_child
+                && wait_pid_matches(self.tasks[parent].wait_pid, exiting_pid)
+            {
                 self.tasks[parent].waiting_child = false;
+                self.tasks[parent].wait_pid = 0;
                 self.tasks[parent].active = true;
-                self.tasks[parent].frame.rax = (exiting + 1) as u64;
-                self.write_wait_status(parent, 0);
+                self.tasks[parent].frame.rax = exiting_pid;
+                self.write_wait_status(parent, status);
+                self.tasks[exiting].zombie = false;
+                self.tasks[exiting].pid = 0;
+                self.tasks[exiting].parent_pid = 0;
                 awakened_parent = Some(parent);
                 break;
             }
@@ -436,39 +514,62 @@ impl UserScheduler {
         unsafe {
             let current_cr3 = crate::arch::read_cr3();
             crate::arch::load_cr3(self.tasks[parent].pml4_phys);
-            *(address as *mut i32) = status;
+            *(address as *mut i32) = (status & 0xff) << 8;
             crate::arch::load_cr3(current_cr3);
         }
         self.tasks[parent].wait_status = 0;
     }
 
     fn wait_for_child(&mut self, frame: &mut TrapFrame, pid: i32) -> WaitResult {
-        let child = if pid <= 0 {
-            3
-        } else {
-            (pid as usize).saturating_sub(1)
-        };
-        if child >= self.installed || child == self.current {
+        let Some(child) = self.find_waitable_child(pid, true) else {
+            if self.find_waitable_child(pid, false).is_some() {
+                if let Some(task_switch) = self.block_current_for_child(frame, pid, frame.rsi) {
+                    return WaitResult::Blocked(task_switch);
+                }
+            }
             return WaitResult::NoChild;
-        }
+        };
 
         if self.tasks[child].zombie {
+            let child_pid = self.tasks[child].pid;
+            let status = self.tasks[child].exit_status;
             self.tasks[child].zombie = false;
             self.tasks[child].active = false;
-            self.write_wait_status(self.current, 0);
-            return WaitResult::Exited((child + 1) as u64);
+            self.tasks[child].waiting_stdin = false;
+            self.tasks[child].waiting_child = false;
+            self.tasks[child].pid = 0;
+            self.tasks[child].parent_pid = 0;
+            self.write_wait_status(self.current, status);
+            return WaitResult::Exited(child_pid);
         }
 
-        if self.tasks[child].active
-            || self.tasks[child].waiting_stdin
-            || self.tasks[child].waiting_child
-        {
-            if let Some(task_switch) = self.block_current_for_child(frame, frame.rsi) {
-                return WaitResult::Blocked(task_switch);
-            }
+        if let Some(task_switch) = self.block_current_for_child(frame, pid, frame.rsi) {
+            return WaitResult::Blocked(task_switch);
         }
 
         WaitResult::NoChild
+    }
+
+    fn find_waitable_child(&self, requested_pid: i32, zombie_only: bool) -> Option<usize> {
+        let parent_pid = self.tasks[self.current].pid;
+        if parent_pid == 0 {
+            return None;
+        }
+        for index in 0..self.installed {
+            let task = self.tasks[index];
+            if task.pid == 0 || task.parent_pid != parent_pid {
+                continue;
+            }
+            if requested_pid > 0 && task.pid != requested_pid as u64 {
+                continue;
+            }
+            let waitable = task.zombie
+                || (!zombie_only && (task.active || task.waiting_stdin || task.waiting_child));
+            if waitable {
+                return Some(index);
+            }
+        }
+        None
     }
 
     fn restart(&mut self, index: usize) -> bool {
@@ -478,6 +579,7 @@ impl UserScheduler {
             self.tasks[index].waiting_stdin = false;
             self.tasks[index].stdin_buffer = 0;
             self.tasks[index].waiting_child = false;
+            self.tasks[index].wait_pid = 0;
             self.tasks[index].wait_status = 0;
             self.tasks[index].zombie = false;
             self.tasks[index].exit_status = 0;
@@ -502,7 +604,9 @@ impl UserScheduler {
         if index >= self.installed {
             return false;
         }
-        self.tasks[index].active || self.tasks[index].waiting_stdin || self.tasks[index].waiting_child
+        self.tasks[index].active
+            || self.tasks[index].waiting_stdin
+            || self.tasks[index].waiting_child
     }
 
     fn reap_task(&mut self, index: usize) {
@@ -514,6 +618,9 @@ impl UserScheduler {
             self.tasks[index].active = false;
             self.tasks[index].waiting_stdin = false;
             self.tasks[index].waiting_child = false;
+            self.tasks[index].wait_pid = 0;
+            self.tasks[index].pid = 0;
+            self.tasks[index].parent_pid = 0;
         }
     }
 }
@@ -522,6 +629,10 @@ pub enum WaitResult {
     Exited(u64),
     Blocked(UserSwitch),
     NoChild,
+}
+
+fn wait_pid_matches(requested_pid: i32, child_pid: u64) -> bool {
+    requested_pid <= 0 || child_pid == requested_pid as u64
 }
 
 struct GlobalScheduler(UnsafeCell<Option<Scheduler>>);
@@ -625,12 +736,16 @@ pub fn fork_current_user_to(child: usize, child_pml4: u64, frame: &TrapFrame) ->
     unsafe { (*USER_SCHEDULER.0.get()).fork_current_to(child, child_pml4, frame) }
 }
 
+pub fn allocate_child_slot() -> Option<usize> {
+    unsafe { (*USER_SCHEDULER.0.get()).allocate_child_slot() }
+}
+
 pub fn wait_for_child(frame: &mut TrapFrame, pid: i32) -> WaitResult {
     unsafe { (*USER_SCHEDULER.0.get()).wait_for_child(frame, pid) }
 }
 
 pub fn block_current_for_spawn(frame: &mut TrapFrame) -> Option<UserSwitch> {
-    unsafe { (*USER_SCHEDULER.0.get()).block_current_for_child(frame, 0) }
+    unsafe { (*USER_SCHEDULER.0.get()).block_current_for_child(frame, -1, 0) }
 }
 
 pub fn current_user_index() -> Option<usize> {
@@ -656,8 +771,16 @@ pub fn current_user_abi() -> Option<UserAbi> {
     unsafe { (*USER_SCHEDULER.0.get()).current_abi() }
 }
 
-pub fn exit_current_user(frame: &mut TrapFrame) -> Option<u64> {
-    unsafe { (*USER_SCHEDULER.0.get()).exit_current(frame) }
+pub fn current_user_pid() -> Option<u64> {
+    unsafe { (*USER_SCHEDULER.0.get()).current_pid() }
+}
+
+pub fn current_user_parent_pid() -> Option<u64> {
+    unsafe { (*USER_SCHEDULER.0.get()).current_parent_pid() }
+}
+
+pub fn exit_current_user(frame: &mut TrapFrame, status: i32) -> Option<u64> {
+    unsafe { (*USER_SCHEDULER.0.get()).exit_current(frame, status) }
 }
 
 pub fn restart_user_task(index: usize) -> bool {

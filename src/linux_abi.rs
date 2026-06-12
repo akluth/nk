@@ -79,8 +79,6 @@ const EAGAIN: i64 = -11;
 const EMFILE: i64 = -24;
 const ENODATA: i64 = -61;
 
-const CHILD_SLOT: usize = 3;
-const CHILD_PID: u64 = (CHILD_SLOT + 1) as u64;
 const USER_BRK_START: u64 = 0x0000_0000_4100_0000;
 const USER_BRK_END: u64 = 0x0000_0000_4140_0000;
 const USER_MMAP_START: u64 = 0x0000_0000_4140_0000;
@@ -109,17 +107,18 @@ impl OpenFile {
     }
 }
 
-struct GlobalOpenFiles(UnsafeCell<[OpenFile; MAX_OPEN_FILES]>);
+struct GlobalOpenFiles(UnsafeCell<[[OpenFile; MAX_OPEN_FILES]; scheduler::USER_TASKS]>);
 
 unsafe impl Sync for GlobalOpenFiles {}
 
 const FIRST_USER_FD: i32 = 3;
 const MAX_OPEN_FILES: usize = 16;
 const FD_BUFFER_CAP: usize = 256 * 1024;
-static OPEN_FILES: GlobalOpenFiles =
-    GlobalOpenFiles(UnsafeCell::new([OpenFile::empty(); MAX_OPEN_FILES]));
-static mut FD_BUFFERS: [[u8; FD_BUFFER_CAP]; MAX_OPEN_FILES] =
-    [[0; FD_BUFFER_CAP]; MAX_OPEN_FILES];
+static OPEN_FILES: GlobalOpenFiles = GlobalOpenFiles(UnsafeCell::new(
+    [[OpenFile::empty(); MAX_OPEN_FILES]; scheduler::USER_TASKS],
+));
+static mut FD_BUFFERS: [[[u8; FD_BUFFER_CAP]; MAX_OPEN_FILES]; scheduler::USER_TASKS] =
+    [[[0; FD_BUFFER_CAP]; MAX_OPEN_FILES]; scheduler::USER_TASKS];
 const INPUT_LINE_CAP: usize = 1024;
 const READY_INPUT_CAP: usize = 2048;
 static mut INPUT_LINE: [u8; INPUT_LINE_CAP] = [0; INPUT_LINE_CAP];
@@ -129,20 +128,23 @@ static mut READY_READ: usize = 0;
 static mut READY_WRITE: usize = 0;
 static mut TASK_CWDS: [[u8; 256]; scheduler::USER_TASKS] = [[0; 256]; scheduler::USER_TASKS];
 static mut TASK_CWD_LENS: [usize; scheduler::USER_TASKS] = [0; scheduler::USER_TASKS];
-static mut MMAP_CURSOR: u64 = USER_MMAP_START;
-static mut PROGRAM_BREAK: u64 = USER_BRK_START;
-static mut STDOUT_BUDGET: isize = -1;
+static mut MMAP_CURSORS: [u64; scheduler::USER_TASKS] = [USER_MMAP_START; scheduler::USER_TASKS];
+static mut PROGRAM_BREAKS: [u64; scheduler::USER_TASKS] = [USER_BRK_START; scheduler::USER_TASKS];
+static mut STDOUT_BUDGETS: [isize; scheduler::USER_TASKS] = [-1; scheduler::USER_TASKS];
 static mut UNKNOWN_LOGS: u64 = 0;
 
 pub fn reset_process_state(index: usize) {
     unsafe {
-        MMAP_CURSOR = USER_MMAP_START;
-        PROGRAM_BREAK = USER_BRK_START;
-        STDOUT_BUDGET = -1;
-        for file in &mut *OPEN_FILES.0.get() {
+        if index >= scheduler::USER_TASKS {
+            return;
+        }
+        MMAP_CURSORS[index] = USER_MMAP_START;
+        PROGRAM_BREAKS[index] = USER_BRK_START;
+        STDOUT_BUDGETS[index] = -1;
+        for file in &mut (*OPEN_FILES.0.get())[index] {
             *file = OpenFile::empty();
         }
-        if index < scheduler::USER_TASKS && TASK_CWD_LENS[index] == 0 {
+        if TASK_CWD_LENS[index] == 0 {
             TASK_CWDS[index][0] = b'/';
             TASK_CWD_LENS[index] = 1;
         }
@@ -151,8 +153,15 @@ pub fn reset_process_state(index: usize) {
 
 pub fn set_stdout_budget(bytes: usize) {
     unsafe {
-        STDOUT_BUDGET = bytes as isize;
+        let index = current_task_index();
+        STDOUT_BUDGETS[index] = bytes as isize;
     }
+}
+
+fn current_task_index() -> usize {
+    scheduler::current_user_index()
+        .filter(|index| *index < scheduler::USER_TASKS)
+        .unwrap_or(0)
 }
 
 pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
@@ -245,9 +254,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_GETPID => {
-            frame.rax = scheduler::current_user_index()
-                .map(|index| (index + 1) as u64)
-                .unwrap_or(1);
+            frame.rax = scheduler::current_user_pid().unwrap_or(1);
             true
         }
         SYS_FORK => {
@@ -265,11 +272,6 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
         SYS_WAIT4 => {
             match scheduler::wait_for_child(frame, frame.rdi as i32) {
                 scheduler::WaitResult::Exited(pid) => {
-                    if frame.rsi != 0 {
-                        unsafe {
-                            *(frame.rsi as *mut i32) = 0;
-                        }
-                    }
                     frame.rax = pid;
                 }
                 scheduler::WaitResult::Blocked(task_switch) => unsafe {
@@ -318,7 +320,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_GETPPID => {
-            frame.rax = 1;
+            frame.rax = scheduler::current_user_parent_pid().unwrap_or(0);
             true
         }
         SYS_ARCH_PRCTL => {
@@ -351,7 +353,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_EXIT => {
-            if let Some(pml4_phys) = scheduler::exit_current_user(frame) {
+            if let Some(pml4_phys) = scheduler::exit_current_user(frame, frame.rdi as i32) {
                 unsafe {
                     crate::arch::load_cr3(pml4_phys);
                 }
@@ -359,7 +361,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_EXIT_GROUP => {
-            if let Some(pml4_phys) = scheduler::exit_current_user(frame) {
+            if let Some(pml4_phys) = scheduler::exit_current_user(frame, frame.rdi as i32) {
                 unsafe {
                     crate::arch::load_cr3(pml4_phys);
                 }
@@ -438,17 +440,22 @@ fn open_at(dirfd: i32, path: *const u8) -> i64 {
     }
 
     unsafe {
+        let task_index = current_task_index();
         let Some((fd, file_index)) = alloc_open_file() else {
             return EMFILE;
         };
         core::ptr::copy_nonoverlapping(
             data.as_ptr(),
-            core::ptr::addr_of_mut!(FD_BUFFERS).cast::<u8>().add(file_index * FD_BUFFER_CAP),
+            core::ptr::addr_of_mut!(FD_BUFFERS)
+                .cast::<u8>()
+                .add((task_index * MAX_OPEN_FILES + file_index) * FD_BUFFER_CAP),
             data.len(),
         );
-        let file = &mut (*OPEN_FILES.0.get())[file_index];
+        let file = &mut (*OPEN_FILES.0.get())[task_index][file_index];
         file.data = Some(core::slice::from_raw_parts(
-            core::ptr::addr_of!(FD_BUFFERS).cast::<u8>().add(file_index * FD_BUFFER_CAP),
+            core::ptr::addr_of!(FD_BUFFERS)
+                .cast::<u8>()
+                .add((task_index * MAX_OPEN_FILES + file_index) * FD_BUFFER_CAP),
             data.len(),
         ));
         file.offset = 0;
@@ -461,7 +468,8 @@ fn open_at(dirfd: i32, path: *const u8) -> i64 {
 }
 
 unsafe fn alloc_open_file() -> Option<(i32, usize)> {
-    let files = &mut *OPEN_FILES.0.get();
+    let task_index = current_task_index();
+    let files = &mut (*OPEN_FILES.0.get())[task_index];
     for index in 0..MAX_OPEN_FILES {
         if files[index].data.is_none() {
             return Some((FIRST_USER_FD + index as i32, index));
@@ -478,7 +486,8 @@ unsafe fn open_file(fd: i32) -> Option<&'static mut OpenFile> {
     if index >= MAX_OPEN_FILES {
         return None;
     }
-    let file = &mut (*OPEN_FILES.0.get())[index];
+    let task_index = current_task_index();
+    let file = &mut (*OPEN_FILES.0.get())[task_index][index];
     if file.data.is_none() {
         return None;
     }
@@ -489,14 +498,19 @@ fn fork(frame: &scheduler::TrapFrame) -> i64 {
     let Some(parent) = scheduler::current_user_index() else {
         return EINVAL;
     };
-    if !memory::copy_user_space(parent, CHILD_SLOT) {
+    let Some(child) = scheduler::allocate_child_slot() else {
+        return EAGAIN;
+    };
+    if !memory::copy_user_space(parent, child) {
         return EINVAL;
     }
-    let Some(child_pml4) = userland::task_pml4(CHILD_SLOT) else {
+    let Some(child_pml4) = userland::task_pml4(child) else {
         return EINVAL;
     };
-    let pid = scheduler::fork_current_user_to(CHILD_SLOT, child_pml4, frame).unwrap_or(CHILD_PID);
-    copy_cwd(parent, CHILD_SLOT);
+    let Some(pid) = scheduler::fork_current_user_to(child, child_pml4, frame) else {
+        return EAGAIN;
+    };
+    copy_process_state(parent, child);
     pid as i64
 }
 
@@ -696,12 +710,13 @@ fn write(fd: i32, buffer: *const u8, len: usize) -> i64 {
     }
 
     let len = unsafe {
-        if fd == 1 && STDOUT_BUDGET >= 0 {
-            if STDOUT_BUDGET == 0 {
+        let task_index = current_task_index();
+        if fd == 1 && STDOUT_BUDGETS[task_index] >= 0 {
+            if STDOUT_BUDGETS[task_index] == 0 {
                 return EPIPE;
             }
-            let allowed = (STDOUT_BUDGET as usize).min(len);
-            STDOUT_BUDGET -= allowed as isize;
+            let allowed = (STDOUT_BUDGETS[task_index] as usize).min(len);
+            STDOUT_BUDGETS[task_index] -= allowed as isize;
             allowed
         } else {
             len
@@ -812,13 +827,14 @@ fn fcntl(fd: i32, command: u64, _arg: u64) -> i64 {
 
 fn brk(request: u64) -> i64 {
     unsafe {
+        let task_index = current_task_index();
         if request == 0 {
-            return PROGRAM_BREAK as i64;
+            return PROGRAM_BREAKS[task_index] as i64;
         }
         if (USER_BRK_START..=USER_BRK_END).contains(&request) {
-            PROGRAM_BREAK = request;
+            PROGRAM_BREAKS[task_index] = request;
         }
-        PROGRAM_BREAK as i64
+        PROGRAM_BREAKS[task_index] as i64
     }
 }
 
@@ -835,11 +851,12 @@ fn mmap(address: u64, len: u64, _prot: u64, flags: u64, fd: i64) -> i64 {
 
     let aligned_len = (len + 4095) & !4095;
     unsafe {
+        let task_index = current_task_index();
         let base = if flags & MAP_FIXED != 0 && address != 0 {
             address
         } else {
-            let next = (MMAP_CURSOR + 4095) & !4095;
-            MMAP_CURSOR = next.saturating_add(aligned_len);
+            let next = (MMAP_CURSORS[task_index] + 4095) & !4095;
+            MMAP_CURSORS[task_index] = next.saturating_add(aligned_len);
             next
         };
         if base < USER_MMAP_START || base.saturating_add(aligned_len) > USER_MMAP_END {
@@ -1556,6 +1573,33 @@ fn copy_cwd(parent: usize, child: usize) {
         } else {
             TASK_CWDS[child][..len].copy_from_slice(&TASK_CWDS[parent][..len]);
             TASK_CWD_LENS[child] = len;
+        }
+    }
+}
+
+fn copy_process_state(parent: usize, child: usize) {
+    copy_cwd(parent, child);
+    if parent >= scheduler::USER_TASKS || child >= scheduler::USER_TASKS {
+        return;
+    }
+    unsafe {
+        MMAP_CURSORS[child] = MMAP_CURSORS[parent];
+        PROGRAM_BREAKS[child] = PROGRAM_BREAKS[parent];
+        STDOUT_BUDGETS[child] = STDOUT_BUDGETS[parent];
+
+        let open_files = &mut *OPEN_FILES.0.get();
+        open_files[child] = open_files[parent];
+
+        let buffers = &mut *core::ptr::addr_of_mut!(FD_BUFFERS);
+        buffers[child] = buffers[parent];
+
+        for fd_index in 0..MAX_OPEN_FILES {
+            if let Some(data) = open_files[child][fd_index].data {
+                open_files[child][fd_index].data = Some(core::slice::from_raw_parts(
+                    buffers[child][fd_index].as_ptr(),
+                    data.len(),
+                ));
+            }
         }
     }
 }

@@ -205,8 +205,7 @@ pub mod gui {
 
     unsafe fn terminal_grid() -> Option<(usize, usize)> {
         let framebuffer = (*FRAMEBUFFER.0.get()).as_ref()?;
-        let cols = (framebuffer.width() / font::advance())
-            .clamp(1, TERM_MAX_COLS);
+        let cols = (framebuffer.width() / font::advance()).clamp(1, TERM_MAX_COLS);
         let rows = (framebuffer.height() / term_line_h()).clamp(1, TERM_MAX_ROWS);
         Some((cols, rows))
     }

@@ -43,7 +43,11 @@ pub fn load_psf(bytes: &[u8]) -> bool {
     }
 
     unsafe {
-        ptr::copy_nonoverlapping(bytes.as_ptr(), ptr::addr_of_mut!(FONT_BYTES).cast(), bytes.len());
+        ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            ptr::addr_of_mut!(FONT_BYTES).cast(),
+            bytes.len(),
+        );
         FONT_LEN = bytes.len();
         FONT = font;
     }

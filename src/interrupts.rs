@@ -645,7 +645,7 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
             return;
         }
         60 | 231 if frame.cs & 0x3 == 0x3 => {
-            if let Some(pml4_phys) = scheduler::exit_current_user(frame) {
+            if let Some(pml4_phys) = scheduler::exit_current_user(frame, frame.rdi as i32) {
                 unsafe {
                     arch::load_cr3(pml4_phys);
                 }
@@ -773,11 +773,7 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
             return;
         }
         46 => {
-            frame.rax = if native_exec(
-                frame.rdi as *const u8,
-                frame.rsi as usize,
-                frame,
-            ) {
+            frame.rax = if native_exec(frame.rdi as *const u8, frame.rsi as usize, frame) {
                 0
             } else {
                 1
@@ -868,7 +864,6 @@ fn native_spawn(
     arg_len: usize,
     frame: &mut scheduler::TrapFrame,
 ) -> bool {
-    const CHILD_SLOT: usize = 1;
     let mut path = [0u8; 256];
     let Some(path) = native_path(path_ptr, path_len, &mut path) else {
         return false;
@@ -889,7 +884,15 @@ fn native_spawn(
         1
     };
 
-    if !crate::userland::spawn_linux_elf(CHILD_SLOT, "exec", path, &argv[..argc]) {
+    let Some(child_slot) = scheduler::allocate_child_slot() else {
+        native_console_write(
+            b"exec failed: no process slots\n".as_ptr(),
+            b"exec failed: no process slots\n".len(),
+        );
+        return false;
+    };
+
+    if !crate::userland::spawn_linux_elf(child_slot, "exec", path, &argv[..argc]) {
         native_console_write(b"exec failed\n".as_ptr(), b"exec failed\n".len());
         return false;
     }
@@ -946,7 +949,7 @@ extern "C" fn rust_exception(
     let frame = unsafe { &mut *frame };
     if frame.cs & 0x3 == 0x3 {
         serial::write_line("nk: terminating faulted user task");
-        if let Some(pml4_phys) = scheduler::exit_current_user(frame) {
+        if let Some(pml4_phys) = scheduler::exit_current_user(frame, 127) {
             unsafe {
                 arch::load_cr3(pml4_phys);
             }

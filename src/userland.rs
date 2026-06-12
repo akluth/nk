@@ -317,12 +317,7 @@ pub fn exec_linux_elf(
     true
 }
 
-pub fn spawn_linux_elf(
-    index: usize,
-    task_name: &'static str,
-    path: &[u8],
-    argv: &[&[u8]],
-) -> bool {
+pub fn spawn_linux_elf(index: usize, task_name: &'static str, path: &[u8], argv: &[&[u8]]) -> bool {
     crate::linux_abi::reset_process_state(index);
     let Some(image) = crate::nkfs::read_file(path) else {
         return false;

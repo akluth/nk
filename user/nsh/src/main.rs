@@ -10,8 +10,6 @@ const SYS_WRITE: u64 = 40;
 const SYS_LS: u64 = 41;
 const SYS_IS_DIR: u64 = 43;
 const SYS_SPAWN_WAIT: u64 = 44;
-const SYS_CHILD_RUNNING: u64 = 45;
-const CHILD_SLOT: u64 = 1;
 
 const LINE_CAP: usize = 256;
 const CWD_CAP: usize = 256;
@@ -137,9 +135,6 @@ impl Shell {
             arg.as_ptr() as u64,
             arg.len() as u64,
         );
-        while syscall1(SYS_CHILD_RUNNING, CHILD_SLOT) != 0 {
-            syscall0(SYS_YIELD);
-        }
     }
 
     fn resolve_command(&self, cmd: &[u8]) -> Path {
@@ -267,21 +262,6 @@ fn syscall2(id: u64, a: u64, b: u64) -> u64 {
             inlateout("rax") id => out,
             in("rdi") a,
             in("rsi") b,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack)
-        );
-    }
-    out
-}
-
-fn syscall1(id: u64, a: u64) -> u64 {
-    let out;
-    unsafe {
-        asm!(
-            "syscall",
-            inlateout("rax") id => out,
-            in("rdi") a,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack)

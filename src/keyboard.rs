@@ -75,18 +75,90 @@ pub fn push_key(byte: u8) {
 
 fn decode(scancode: u8, shift: bool) -> Option<u8> {
     let byte = match scancode {
-        0x02 => if shift { b'!' } else { b'1' },
-        0x03 => if shift { b'"' } else { b'2' },
-        0x04 => if shift { 0 } else { b'3' },
-        0x05 => if shift { b'$' } else { b'4' },
-        0x06 => if shift { b'%' } else { b'5' },
-        0x07 => if shift { b'&' } else { b'6' },
-        0x08 => if shift { b'/' } else { b'7' },
-        0x09 => if shift { b'(' } else { b'8' },
-        0x0a => if shift { b')' } else { b'9' },
-        0x0b => if shift { b'=' } else { b'0' },
-        0x0c => if shift { b'?' } else { b'-' },
-        0x0d => if shift { b'`' } else { b'\'' },
+        0x02 => {
+            if shift {
+                b'!'
+            } else {
+                b'1'
+            }
+        }
+        0x03 => {
+            if shift {
+                b'"'
+            } else {
+                b'2'
+            }
+        }
+        0x04 => {
+            if shift {
+                0
+            } else {
+                b'3'
+            }
+        }
+        0x05 => {
+            if shift {
+                b'$'
+            } else {
+                b'4'
+            }
+        }
+        0x06 => {
+            if shift {
+                b'%'
+            } else {
+                b'5'
+            }
+        }
+        0x07 => {
+            if shift {
+                b'&'
+            } else {
+                b'6'
+            }
+        }
+        0x08 => {
+            if shift {
+                b'/'
+            } else {
+                b'7'
+            }
+        }
+        0x09 => {
+            if shift {
+                b'('
+            } else {
+                b'8'
+            }
+        }
+        0x0a => {
+            if shift {
+                b')'
+            } else {
+                b'9'
+            }
+        }
+        0x0b => {
+            if shift {
+                b'='
+            } else {
+                b'0'
+            }
+        }
+        0x0c => {
+            if shift {
+                b'?'
+            } else {
+                b'-'
+            }
+        }
+        0x0d => {
+            if shift {
+                b'`'
+            } else {
+                b'\''
+            }
+        }
         0x0e => 8,
         0x1c => b'\n',
         0x39 => b' ',
@@ -101,7 +173,13 @@ fn decode(scancode: u8, shift: bool) -> Option<u8> {
         0x18 => letter(b'o', shift),
         0x19 => letter(b'p', shift),
         0x1a => 0,
-        0x1b => if shift { b'*' } else { b'+' },
+        0x1b => {
+            if shift {
+                b'*'
+            } else {
+                b'+'
+            }
+        }
         0x1e => letter(b'a', shift),
         0x1f => letter(b's', shift),
         0x20 => letter(b'd', shift),
@@ -113,8 +191,20 @@ fn decode(scancode: u8, shift: bool) -> Option<u8> {
         0x26 => letter(b'l', shift),
         0x27 => 0,
         0x28 => 0,
-        0x29 => if shift { b'>' } else { b'^' },
-        0x2b => if shift { b'\'' } else { b'#' },
+        0x29 => {
+            if shift {
+                b'>'
+            } else {
+                b'^'
+            }
+        }
+        0x2b => {
+            if shift {
+                b'\''
+            } else {
+                b'#'
+            }
+        }
         0x2c => letter(b'y', shift),
         0x2d => letter(b'x', shift),
         0x2e => letter(b'c', shift),
@@ -122,9 +212,27 @@ fn decode(scancode: u8, shift: bool) -> Option<u8> {
         0x30 => letter(b'b', shift),
         0x31 => letter(b'n', shift),
         0x32 => letter(b'm', shift),
-        0x33 => if shift { b';' } else { b',' },
-        0x34 => if shift { b':' } else { b'.' },
-        0x35 => if shift { b'?' } else { b'/' },
+        0x33 => {
+            if shift {
+                b';'
+            } else {
+                b','
+            }
+        }
+        0x34 => {
+            if shift {
+                b':'
+            } else {
+                b'.'
+            }
+        }
+        0x35 => {
+            if shift {
+                b'?'
+            } else {
+                b'/'
+            }
+        }
         _ => return None,
     };
     if byte == 0 {
