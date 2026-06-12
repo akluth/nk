@@ -832,6 +832,13 @@ fn brk(request: u64) -> i64 {
             return PROGRAM_BREAKS[task_index] as i64;
         }
         if (USER_BRK_START..=USER_BRK_END).contains(&request) {
+            let current = PROGRAM_BREAKS[task_index];
+            if request > current {
+                let len = (request - current) as usize;
+                if !memory::allocate_user_range(task_index, current, len, true) {
+                    return current as i64;
+                }
+            }
             PROGRAM_BREAKS[task_index] = request;
         }
         PROGRAM_BREAKS[task_index] as i64
@@ -860,6 +867,9 @@ fn mmap(address: u64, len: u64, _prot: u64, flags: u64, fd: i64) -> i64 {
             next
         };
         if base < USER_MMAP_START || base.saturating_add(aligned_len) > USER_MMAP_END {
+            return -12;
+        }
+        if !memory::allocate_user_range(task_index, base, aligned_len as usize, true) {
             return -12;
         }
         base as i64
@@ -1619,17 +1629,7 @@ fn read_slice_u32(bytes: &[u8], offset: usize) -> Option<u32> {
 }
 
 fn user_buffer_readable(address: u64, len: usize) -> bool {
-    if len == 0 {
-        return true;
-    }
-    let Some(end) = address.checked_add(len as u64) else {
-        return false;
-    };
-    let image_start = memory::USER_IMAGE_BASE;
-    let image_end = image_start + memory::USER_IMAGE_SIZE as u64;
-    let stack_start = memory::USER_STACK_BASE;
-    let stack_end = stack_start + memory::USER_STACK_SIZE as u64;
-    (address >= image_start && end <= image_end) || (address >= stack_start && end <= stack_end)
+    memory::user_range_mapped(current_task_index(), address, len)
 }
 
 unsafe fn read_user_u64(ptr: *const u8) -> u64 {

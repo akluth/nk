@@ -197,6 +197,9 @@ Already done:
 - Dynamic PID allocation on top of the current fixed backing slots, including
   parent PID tracking, PID-specific `wait4`, zombie reaping, and per-task Linux
   ABI state for CWD, file descriptors, `brk`, `mmap`, and stdout limiting.
+- User memory is backed by a kernel-managed 4 KiB page pool instead of fixed
+  per-slot image/stack byte arrays; ELF segments, stacks, `brk`, `mmap`, and
+  `fork` copies allocate and map per-task pages on demand.
 - PS/2 keyboard and mouse IRQ paths with small user-facing input syscalls.
 - A dynamically loaded Spleen 12x24 PSF2 font at `/etc/font.psf`.
 - A framebuffer terminal with incremental row/cell redraws instead of full
@@ -205,8 +208,8 @@ Already done:
 
 Still useful next:
 
-- Replace the remaining fixed backing slots with a real growable process table
-  backed by per-process virtual memory objects and page allocation.
+- Replace the remaining fixed task-slot ceiling with a growable process table
+  and a real physical page allocator fed by the boot memory map.
 - Expand the Linux/POSIX ABI with pipes, descriptor duplication, `poll`/`select`,
   signals, termios/TTY handling, process groups, and job-control semantics.
 - Add proper argv/envp/auxv setup for Linux ABI program startup.
