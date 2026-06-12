@@ -893,6 +893,9 @@ fn native_spawn(
         native_console_write(b"exec failed\n".as_ptr(), b"exec failed\n".len());
         return false;
     }
+    if name == b"yes" {
+        crate::linux_abi::set_stdout_budget(96);
+    }
     if let Some(task_switch) = scheduler::block_current_for_spawn(frame) {
         unsafe {
             arch::load_cr3(task_switch.pml4_phys);

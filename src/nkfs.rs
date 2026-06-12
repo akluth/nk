@@ -6,6 +6,7 @@ const MAGIC: &[u8; 8] = b"NKFSv1\0\0";
 const VERSION: u32 = 1;
 const INODE_SIZE: usize = 128;
 const MAX_FILE_SIZE: usize = 20 * 1024 * 1024;
+const SMALL_FILE_CACHE_SIZE: usize = 512 * 1024;
 
 const KIND_FILE: u16 = 1;
 const KIND_DIR: u16 = 2;
@@ -13,7 +14,11 @@ const KIND_DIR: u16 = 2;
 static mut FILE_CACHE: [u8; MAX_FILE_SIZE] = [0; MAX_FILE_SIZE];
 static mut FILE_CACHE_INODE: u32 = 0;
 static mut FILE_CACHE_LEN: usize = 0;
+static mut SMALL_FILE_CACHE: [u8; SMALL_FILE_CACHE_SIZE] = [0; SMALL_FILE_CACHE_SIZE];
+static mut SMALL_FILE_CACHE_INODE: u32 = 0;
+static mut SMALL_FILE_CACHE_LEN: usize = 0;
 static mut DIR_BUFFER: [u8; ata::SECTOR_SIZE * 16] = [0; ata::SECTOR_SIZE * 16];
+static mut EXTENT_BUFFER: [u8; ata::SECTOR_SIZE * 128] = [0; ata::SECTOR_SIZE * 128];
 
 #[derive(Clone, Copy)]
 struct Superblock {
@@ -52,6 +57,15 @@ pub fn read_file(path: &[u8]) -> Option<&'static [u8]> {
         return None;
     }
     unsafe {
+        if inode.size <= SMALL_FILE_CACHE_SIZE
+            && SMALL_FILE_CACHE_INODE == inode.number
+            && SMALL_FILE_CACHE_LEN == inode.size
+        {
+            return Some(core::slice::from_raw_parts(
+                ptr::addr_of!(SMALL_FILE_CACHE).cast(),
+                SMALL_FILE_CACHE_LEN,
+            ));
+        }
         if FILE_CACHE_INODE == inode.number && FILE_CACHE_LEN == inode.size {
             return Some(core::slice::from_raw_parts(
                 ptr::addr_of!(FILE_CACHE).cast(),
@@ -59,19 +73,29 @@ pub fn read_file(path: &[u8]) -> Option<&'static [u8]> {
             ));
         }
     }
-    read_extent(
-        inode.extent_start,
-        inode.size,
-        ptr::addr_of_mut!(FILE_CACHE).cast(),
-        MAX_FILE_SIZE,
-    )?;
+
+    let (out, out_len) = if inode.size <= SMALL_FILE_CACHE_SIZE {
+        (ptr::addr_of_mut!(SMALL_FILE_CACHE).cast(), SMALL_FILE_CACHE_SIZE)
+    } else {
+        (ptr::addr_of_mut!(FILE_CACHE).cast(), MAX_FILE_SIZE)
+    };
+    read_extent(inode.extent_start, inode.size, out, out_len)?;
     unsafe {
-        FILE_CACHE_INODE = inode.number;
-        FILE_CACHE_LEN = inode.size;
-        Some(core::slice::from_raw_parts(
-            ptr::addr_of!(FILE_CACHE).cast(),
-            inode.size,
-        ))
+        if inode.size <= SMALL_FILE_CACHE_SIZE {
+            SMALL_FILE_CACHE_INODE = inode.number;
+            SMALL_FILE_CACHE_LEN = inode.size;
+            Some(core::slice::from_raw_parts(
+                ptr::addr_of!(SMALL_FILE_CACHE).cast(),
+                inode.size,
+            ))
+        } else {
+            FILE_CACHE_INODE = inode.number;
+            FILE_CACHE_LEN = inode.size;
+            Some(core::slice::from_raw_parts(
+                ptr::addr_of!(FILE_CACHE).cast(),
+                inode.size,
+            ))
+        }
     }
 }
 
@@ -280,21 +304,20 @@ fn read_extent(start_block: u32, size: usize, out: *mut u8, out_len: usize) -> O
     }
     let sectors = align_up(size, ata::SECTOR_SIZE) / ata::SECTOR_SIZE;
     let mut written = 0usize;
-    let mut sector_buffer = [0u8; ata::SECTOR_SIZE * 32];
     while written < size {
         let remaining_sectors = sectors - (written / ata::SECTOR_SIZE);
-        let chunk_sectors = remaining_sectors.min(32);
+        let chunk_sectors = remaining_sectors.min(128);
         let chunk_bytes = chunk_sectors * ata::SECTOR_SIZE;
-        if !ata::read_sectors(
-            start_block + (written / ata::SECTOR_SIZE) as u32,
-            chunk_sectors,
-            &mut sector_buffer[..chunk_bytes],
-        ) {
+        let buffer = unsafe {
+            core::slice::from_raw_parts_mut(ptr::addr_of_mut!(EXTENT_BUFFER).cast(), chunk_bytes)
+        };
+        if !ata::read_sectors(start_block + (written / ata::SECTOR_SIZE) as u32, chunk_sectors, buffer)
+        {
             return None;
         }
         let count = (size - written).min(chunk_bytes);
         unsafe {
-            ptr::copy_nonoverlapping(sector_buffer.as_ptr(), out.add(written), count);
+            ptr::copy_nonoverlapping(ptr::addr_of!(EXTENT_BUFFER).cast(), out.add(written), count);
         }
         written += count;
     }

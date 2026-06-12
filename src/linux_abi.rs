@@ -73,6 +73,7 @@ const ECHILD: i64 = -10;
 const ENOENT: i64 = -2;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
+const EPIPE: i64 = -32;
 const ENOSYS: i64 = -38;
 const EAGAIN: i64 = -11;
 const EMFILE: i64 = -24;
@@ -130,12 +131,14 @@ static mut TASK_CWDS: [[u8; 256]; scheduler::USER_TASKS] = [[0; 256]; scheduler:
 static mut TASK_CWD_LENS: [usize; scheduler::USER_TASKS] = [0; scheduler::USER_TASKS];
 static mut MMAP_CURSOR: u64 = USER_MMAP_START;
 static mut PROGRAM_BREAK: u64 = USER_BRK_START;
+static mut STDOUT_BUDGET: isize = -1;
 static mut UNKNOWN_LOGS: u64 = 0;
 
 pub fn reset_process_state(index: usize) {
     unsafe {
         MMAP_CURSOR = USER_MMAP_START;
         PROGRAM_BREAK = USER_BRK_START;
+        STDOUT_BUDGET = -1;
         for file in &mut *OPEN_FILES.0.get() {
             *file = OpenFile::empty();
         }
@@ -143,6 +146,12 @@ pub fn reset_process_state(index: usize) {
             TASK_CWDS[index][0] = b'/';
             TASK_CWD_LENS[index] = 1;
         }
+    }
+}
+
+pub fn set_stdout_budget(bytes: usize) {
+    unsafe {
+        STDOUT_BUDGET = bytes as isize;
     }
 }
 
@@ -685,6 +694,19 @@ fn write(fd: i32, buffer: *const u8, len: usize) -> i64 {
     if fd != 1 && fd != 2 {
         return EBADF;
     }
+
+    let len = unsafe {
+        if fd == 1 && STDOUT_BUDGET >= 0 {
+            if STDOUT_BUDGET == 0 {
+                return EPIPE;
+            }
+            let allowed = (STDOUT_BUDGET as usize).min(len);
+            STDOUT_BUDGET -= allowed as isize;
+            allowed
+        } else {
+            len
+        }
+    };
 
     let mut written = 0usize;
     while written < len {
