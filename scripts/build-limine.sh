@@ -213,6 +213,7 @@ build_user_program gui
 build_user_program taskview
 build_user_program init
 build_user_program nsh
+build_user_program nkedit
 ensure_coreutils
 ensure_bash_program
 ensure_nasm_program
@@ -224,6 +225,7 @@ app_files=(
   "$BUILD/user/taskview.elf=/bin/taskviewer"
   "$BUILD/user/init.elf=/bin/init"
   "$BUILD/user/nsh.elf=/bin/nsh"
+  "$BUILD/user/nkedit.elf=/bin/nkedit"
   "$BUILD/user/bash.elf=/bin/bash"
   "$BUILD/user/nasm.elf=/bin/nasm"
 )

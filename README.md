@@ -48,7 +48,8 @@ writable nkfs root filesystem disk.
 - `nsh` can start Coreutils commands on demand through the minimal
   `fork`/`execve`/`wait4` path; examples such as `ls /bin`, `echo ok`, and
   `cat /hello.txt` run against the nkfs root disk.
-- `nsh` has a tiny `edit <path>` command for creating text files on nkfs, and
+- `nsh` has a tiny built-in `edit <path>` command plus `/bin/nkedit`, a
+  separate slim userland editor ELF that uses normal Linux-style file syscalls.
   `/bin/nasm` can assemble `/home/root/hello.asm` into a new persistent
   executable that immediately runs in Ring 3.
 
@@ -226,8 +227,9 @@ Already done:
 - A first init process (`/bin/init`) that starts the default native shell
   (`/bin/nsh`) instead of making the kernel depend on a shell implementation.
 - A nkfs root disk with UNIX-like absolute paths, `/bin`, `/etc`,
-  `/home/root`, `/hello.txt`, `/bin/init`, `/bin/nsh`, `/bin/bash`, `/bin/gui`,
-  `/bin/taskview`, `/bin/nasm`, and uutils Coreutils aliases.
+  `/home/root`, `/hello.txt`, `/bin/init`, `/bin/nsh`, `/bin/nkedit`,
+  `/bin/bash`, `/bin/gui`, `/bin/taskview`, `/bin/nasm`, and uutils Coreutils
+  aliases.
 - Persistent writable regular files on nkfs, including `open(O_CREAT)`,
   `write`, `writev`, `pwrite64`, `truncate`, `ftruncate`, `unlink`,
   `unlinkat`, directory listing integration, file-backed `mmap`, on-disk inode

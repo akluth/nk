@@ -20,7 +20,7 @@ const EDIT_CAP: usize = 4096;
 pub extern "C" fn _start() -> ! {
     let mut shell = Shell::new();
     shell.write(b"nk shell ready\n");
-    shell.write(b"type: ls, cat, edit, nasm, cd, pwd, version, shutdown\n");
+    shell.write(b"type: ls, cat, edit, nkedit, nasm, cd, pwd, version, shutdown\n");
     loop {
         shell.prompt();
         shell.read_line();
@@ -89,7 +89,7 @@ impl Shell {
         }
         let (cmd, arg) = split_first(line);
         match cmd {
-            b"help" => self.write(b"commands: ls cat edit cd pwd version shutdown; external: nasm echo coreutils...\n"),
+            b"help" => self.write(b"commands: ls cat edit nkedit cd pwd version shutdown; external: nasm echo coreutils...\n"),
             b"version" => self.write(b"nk userspace shell 0.1\n"),
             b"pwd" => {
                 self.write(&self.cwd[..self.cwd_len]);
@@ -106,6 +106,7 @@ impl Shell {
                 let path = arg.map(|value| self.resolve_arg(value));
                 self.edit_file(path);
             }
+            b"nkedit" => self.run_external_path_arg(cmd, arg),
             b"cd" => {
                 let path = self.resolve_arg(arg.unwrap_or(b"/"));
                 if syscall2(SYS_IS_DIR, path.as_ptr() as u64, path.len() as u64) == 0 {
@@ -142,6 +143,22 @@ impl Shell {
             path.len() as u64,
             arg.as_ptr() as u64,
             arg.len() as u64,
+        );
+    }
+
+    fn run_external_path_arg(&self, cmd: &[u8], arg: Option<&[u8]>) {
+        let Some(arg) = arg else {
+            self.write(b"usage: nkedit PATH\n");
+            return;
+        };
+        let path = self.resolve_command(cmd);
+        let arg_path = self.resolve_arg(arg);
+        let _ = syscall4(
+            SYS_SPAWN_WAIT,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            arg_path.as_ptr() as u64,
+            arg_path.len() as u64,
         );
     }
 
