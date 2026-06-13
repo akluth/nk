@@ -240,6 +240,8 @@ app_files+=("$ROOT/apps/HELLO.TXT=/HELLO.TXT")
 app_files+=("$ROOT/apps/font.psf=/etc/font.psf")
 app_files+=("$ROOT/apps/hello.asm=/home/root/hello.asm")
 app_files+=("$ROOT/apps/hello.asm=/hello.asm")
+app_files+=("$ROOT/apps/deutschland.asm=/home/root/deutschland.asm")
+app_files+=("$ROOT/apps/deutschland.asm=/deutschland.asm")
 python3 "$ROOT/scripts/mkfs-nkfs.py" "$BUILD/nk-root.nkfs" "${app_files[@]}"
 
 cp "$ROOT/target/x86_64-unknown-none/release/nk" "$ISO_ROOT/boot/nk"

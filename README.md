@@ -51,8 +51,9 @@ writable nkfs root filesystem disk.
 - `nsh` has a tiny built-in `edit <path>` command plus `/bin/nkedit`, a
   separate slim full-screen userland editor ELF. `nkedit` uses normal
   Linux-style terminal and file syscalls, with `Ctrl-S` to save and `Ctrl-X` to
-  exit. `/bin/nasm` can assemble `/home/root/hello.asm` into a new persistent
-  executable that immediately runs in Ring 3.
+  exit. `/bin/nasm` can assemble `/home/root/hello.asm` or
+  `/home/root/deutschland.asm` into a new persistent executable that immediately
+  runs in Ring 3.
 
 ## Architecture
 

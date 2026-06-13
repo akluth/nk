@@ -734,7 +734,9 @@ extern "C" fn rust_keyboard_interrupt() {
     let scancode = unsafe { arch::inb(0x60) };
     if let Some(byte) = keyboard::decode_scancode(scancode) {
         keyboard::push_key(byte);
-        if matches!(scheduler::current_user_abi(), Some(UserAbi::Linux)) {
+        if matches!(scheduler::current_user_abi(), Some(UserAbi::Linux))
+            || scheduler::stdin_waiter_index().is_some()
+        {
             linux_abi::handle_stdin_key(byte);
         }
     }

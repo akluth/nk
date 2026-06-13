@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 
-use crate::{arch, memory, nkfs, scheduler, serial, services, userland};
+use crate::{arch, keyboard, memory, nkfs, scheduler, serial, services, userland};
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
@@ -724,6 +724,19 @@ fn read_stdin(frame: &mut scheduler::TrapFrame, buffer: *mut u8, len: usize) -> 
         return Some(0);
     }
 
+    if unsafe { STDIN_RAW[current_task_index()] } {
+        if let Some(count) = pop_ready_input(buffer, len) {
+            return Some(count as i64);
+        }
+        if let Some(byte) = keyboard::pop_key() {
+            unsafe {
+                *buffer = byte;
+            }
+            return Some(1);
+        }
+        return Some(EAGAIN);
+    }
+
     if let Some(count) = pop_ready_input(buffer, len) {
         return Some(count as i64);
     }
@@ -742,8 +755,6 @@ pub fn handle_stdin_key(byte: u8) {
     unsafe {
         let task = scheduler::stdin_waiter_index().unwrap_or_else(current_task_index);
         if STDIN_RAW[task] {
-            push_ready_byte(byte);
-            wake_stdin_reader();
             return;
         }
         match byte {
@@ -786,14 +797,6 @@ unsafe fn push_ready_input(byte: u8) {
         READY_INPUT[READY_WRITE] = INPUT_LINE[index];
         READY_WRITE = next;
     }
-    let next = (READY_WRITE + 1) % READY_INPUT_CAP;
-    if next != READY_READ {
-        READY_INPUT[READY_WRITE] = byte;
-        READY_WRITE = next;
-    }
-}
-
-unsafe fn push_ready_byte(byte: u8) {
     let next = (READY_WRITE + 1) % READY_INPUT_CAP;
     if next != READY_READ {
         READY_INPUT[READY_WRITE] = byte;

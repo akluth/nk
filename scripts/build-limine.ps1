@@ -158,6 +158,7 @@ $BashElf = Join-Path $Build "user\bash.elf"
 $NasmElf = Join-Path $Build "user\nasm.elf"
 $HelloTxt = Join-Path $Root "apps\HELLO.TXT"
 $HelloAsm = Join-Path $Root "apps\hello.asm"
+$DeutschlandAsm = Join-Path $Root "apps\deutschland.asm"
 $FontPsf = Join-Path $Root "apps\font.psf"
 $AppFiles = @(
     "$GuiElf=/bin/gui",
@@ -173,7 +174,9 @@ $AppFiles = @(
     "$HelloTxt=/hello.txt",
     "$HelloTxt=/HELLO.TXT",
     "$HelloAsm=/home/root/hello.asm",
-    "$HelloAsm=/hello.asm"
+    "$HelloAsm=/hello.asm",
+    "$DeutschlandAsm=/home/root/deutschland.asm",
+    "$DeutschlandAsm=/deutschland.asm"
 )
 $AppFiles += Coreutils-AppFiles
 

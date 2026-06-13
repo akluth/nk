@@ -1,7 +1,11 @@
 #![no_std]
 #![no_main]
 
-use core::{arch::asm, panic::PanicInfo, ptr};
+use core::{
+    arch::{asm, global_asm},
+    panic::PanicInfo,
+    ptr,
+};
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
@@ -37,13 +41,18 @@ static mut PATH: [u8; PATH_CAP] = [0; PATH_CAP];
 static mut ORIGINAL_TERMIOS: [u8; 64] = [0; 64];
 static mut RAW_TERMIOS: [u8; 64] = [0; 64];
 
+global_asm!(
+    r#"
+    .global _start
+_start:
+    mov rdi, rsp
+    call nkedit_start
+"#
+);
+
 #[no_mangle]
-pub extern "C" fn _start() -> ! {
-    let stack: u64;
-    unsafe {
-        asm!("mov {}, rsp", out(reg) stack, options(nomem, nostack, preserves_flags));
-    }
-    let code = main(stack as *const u64);
+pub extern "C" fn nkedit_start(stack: *const u64) -> ! {
+    let code = main(stack);
     exit(code)
 }
 
@@ -64,6 +73,7 @@ fn main(stack: *const u64) -> i32 {
         cursor: 0,
         top_line: 0,
         dirty: false,
+        quit_armed: false,
         status: b"^ means Ctrl/Strg",
     };
     editor.load();
@@ -74,9 +84,9 @@ fn main(stack: *const u64) -> i32 {
         match key {
             CTRL_S => editor.save(),
             CTRL_X => {
-                if editor.dirty {
+                if editor.dirty && !editor.quit_armed {
                     editor.status = b"Unsaved changes. ^S saves, ^X again quits";
-                    editor.dirty = false;
+                    editor.quit_armed = true;
                     editor.render();
                 } else {
                     disable_raw_mode();
@@ -99,6 +109,7 @@ struct Editor {
     cursor: usize,
     top_line: usize,
     dirty: bool,
+    quit_armed: bool,
     status: &'static [u8],
 }
 
@@ -123,6 +134,7 @@ impl Editor {
             self.len += read as usize;
         }
         sys_close(fd as i32);
+        self.cursor = self.len;
         self.status = if self.len == BUFFER_CAP {
             b"File truncated to editor buffer"
         } else {
@@ -185,6 +197,7 @@ impl Editor {
         self.cursor += 1;
         self.len += 1;
         self.dirty = true;
+        self.quit_armed = false;
         self.status = b"Modified";
     }
 
@@ -203,6 +216,7 @@ impl Editor {
         self.cursor -= 1;
         self.len -= 1;
         self.dirty = true;
+        self.quit_armed = false;
         self.status = b"Modified";
     }
 
@@ -230,6 +244,7 @@ impl Editor {
         }
         sys_close(fd as i32);
         self.dirty = false;
+        self.quit_armed = false;
         self.status = b"Saved";
     }
 
