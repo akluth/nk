@@ -35,6 +35,7 @@ const DESC_F_NEXT: u16 = 1;
 const DESC_F_WRITE: u16 = 2;
 
 const VIRTIO_BLK_T_IN: u32 = 0;
+const VIRTIO_BLK_T_OUT: u32 = 1;
 
 pub fn init() {
     let mut visitor = VirtioVisitor { devices: 0 };
@@ -54,6 +55,13 @@ pub fn read_block_sectors(lba: u32, sectors: usize, out: &mut [u8]) -> bool {
         return false;
     }
     unsafe { (*BLOCK.0.get()).read(lba as u64, sectors, out) }
+}
+
+pub fn write_block_sectors(lba: u32, sectors: usize, data: &[u8]) -> bool {
+    if sectors == 0 || data.len() < sectors * SECTOR_SIZE {
+        return false;
+    }
+    unsafe { (*BLOCK.0.get()).write(lba as u64, sectors, data) }
 }
 
 pub fn handle_block_irq() {
@@ -290,10 +298,58 @@ impl LegacyBlock {
         false
     }
 
+    unsafe fn write(&mut self, lba: u64, sectors: usize, data: &[u8]) -> bool {
+        if !self.ready || sectors > 128 {
+            return false;
+        }
+        let byte_len = sectors * SECTOR_SIZE;
+        let dma = &mut *BLOCK_DMA.0.get();
+        let Some(slot_index) = self.allocate_slot() else {
+            return false;
+        };
+        dma[slot_index].bytes[..byte_len].copy_from_slice(&data[..byte_len]);
+        if !self.submit(slot_index, VIRTIO_BLK_T_OUT, lba, sectors, false) {
+            self.slots[slot_index].active = false;
+            return false;
+        }
+
+        for _ in 0..100_000 {
+            self.process_completions();
+            if self.slots[slot_index].complete {
+                let ok = self.slots[slot_index].ok;
+                self.slots[slot_index].active = false;
+                return ok;
+            }
+            if arch::interrupts_enabled() {
+                arch::halt();
+            }
+        }
+
+        self.slots[slot_index].active = false;
+        self.log_timeout();
+        false
+    }
+
     unsafe fn submit_read(&mut self, lba: u64, sectors: usize) -> Option<usize> {
         let slot_index = self.allocate_slot()?;
+        if self.submit(slot_index, VIRTIO_BLK_T_IN, lba, sectors, true) {
+            Some(slot_index)
+        } else {
+            self.slots[slot_index].active = false;
+            None
+        }
+    }
+
+    unsafe fn submit(
+        &mut self,
+        slot_index: usize,
+        request_type: u32,
+        lba: u64,
+        sectors: usize,
+        device_writes_data: bool,
+    ) -> bool {
         let slot = &mut self.slots[slot_index];
-        slot.request.request_type = VIRTIO_BLK_T_IN;
+        slot.request.request_type = request_type;
         slot.request.reserved = 0;
         slot.request.sector = lba;
         slot.status = 0xff;
@@ -305,18 +361,18 @@ impl LegacyBlock {
             memory::kernel_virt_to_phys((&slot.request as *const _) as u64)
         else {
             slot.active = false;
-            return None;
+            return false;
         };
         let Some(status_phys) = memory::kernel_virt_to_phys((&slot.status as *const _) as u64)
         else {
             slot.active = false;
-            return None;
+            return false;
         };
         let dma = &mut *BLOCK_DMA.0.get();
         let Some(out_phys) = memory::kernel_virt_to_phys(dma[slot_index].bytes.as_ptr() as u64)
         else {
             slot.active = false;
-            return None;
+            return false;
         };
 
         let byte_len = sectors * SECTOR_SIZE;
@@ -332,7 +388,7 @@ impl LegacyBlock {
         core::ptr::write_volatile(desc.add(head as usize + 1), Descriptor {
             addr: out_phys,
             len: byte_len as u32,
-            flags: DESC_F_NEXT | DESC_F_WRITE,
+            flags: DESC_F_NEXT | if device_writes_data { DESC_F_WRITE } else { 0 },
             next: head + 2,
         });
         core::ptr::write_volatile(desc.add(head as usize + 2), Descriptor {
@@ -356,7 +412,7 @@ impl LegacyBlock {
         self.next_avail = avail_idx.wrapping_add(1);
         compiler_fence(Ordering::SeqCst);
         arch::outw(self.io_base + LEGACY_QUEUE_NOTIFY, 0);
-        Some(slot_index)
+        true
     }
 
     unsafe fn allocate_slot(&self) -> Option<usize> {

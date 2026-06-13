@@ -9,6 +9,7 @@ const MAX_FILE_SIZE: usize = 20 * 1024 * 1024;
 const SMALL_FILE_CACHE_SIZE: usize = 512 * 1024;
 const RAM_FILE_CAP: usize = 256 * 1024;
 const RAM_FILE_COUNT: usize = 32;
+const MAX_INODES: u32 = 256;
 
 const KIND_FILE: u16 = 1;
 const KIND_DIR: u16 = 2;
@@ -34,6 +35,10 @@ struct RamFile {
     path_len: usize,
     data: [u8; RAM_FILE_CAP],
     len: usize,
+    inode: u32,
+    extent_start: u32,
+    extent_blocks: u32,
+    dirty: bool,
 }
 
 impl RamFile {
@@ -44,6 +49,10 @@ impl RamFile {
             path_len: 0,
             data: [0; RAM_FILE_CAP],
             len: 0,
+            inode: 0,
+            extent_start: 0,
+            extent_blocks: 0,
+            dirty: false,
         }
     }
 }
@@ -57,7 +66,11 @@ struct Superblock {
     block_size: u32,
     inode_count: u32,
     inode_table_start: u32,
+    inode_table_blocks: u32,
+    data_start: u32,
     root_inode: u32,
+    next_free_block: u32,
+    total_blocks: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -72,6 +85,7 @@ struct Inode {
     kind: u16,
     size: usize,
     extent_start: u32,
+    extent_blocks: u32,
 }
 
 pub fn smoke_test() {
@@ -244,10 +258,9 @@ pub fn open_writable_file(path: &[u8], truncate: bool) -> Option<usize> {
         }
         return Some(index);
     }
-    if !parent_directory_exists(path) {
-        return None;
-    }
-
+    let fs = mount()?;
+    let path = normalized_path_bytes(path)?;
+    let inode = resolve_path(fs, path);
     unsafe {
         let files = &mut *RAM_FILES.0.get();
         for index in 0..RAM_FILE_COUNT {
@@ -255,7 +268,44 @@ pub fn open_writable_file(path: &[u8], truncate: bool) -> Option<usize> {
                 files[index].used = true;
                 files[index].path[..path.len()].copy_from_slice(path);
                 files[index].path_len = path.len();
+                if let Some(inode) = inode {
+                    if inode.kind != KIND_FILE || inode.size > RAM_FILE_CAP {
+                        files[index] = RamFile::empty();
+                        return None;
+                    }
+                    files[index].inode = inode.number;
+                    files[index].extent_start = inode.extent_start;
+                    files[index].extent_blocks = inode.extent_blocks;
+                    if truncate {
+                        files[index].len = 0;
+                        files[index].dirty = true;
+                        if !flush_writable_file(index) {
+                            files[index] = RamFile::empty();
+                            return None;
+                        }
+                    } else {
+                        files[index].len = inode.size;
+                        if inode.size > 0 {
+                            read_extent(
+                                inode.extent_start,
+                                inode.size,
+                                files[index].data.as_mut_ptr(),
+                                RAM_FILE_CAP,
+                            )?;
+                        }
+                    }
+                    return Some(index);
+                }
+
+                let Some((inode_number, extent_start)) = create_disk_file(fs, path) else {
+                    files[index] = RamFile::empty();
+                    return None;
+                };
+                files[index].inode = inode_number;
+                files[index].extent_start = extent_start;
+                files[index].extent_blocks = 1;
                 files[index].len = 0;
+                files[index].dirty = false;
                 return Some(index);
             }
         }
@@ -288,6 +338,10 @@ pub fn write_ram_file(index: usize, offset: usize, bytes: &[u8]) -> Option<usize
         let count = bytes.len().min(RAM_FILE_CAP - offset);
         file.data[offset..offset + count].copy_from_slice(&bytes[..count]);
         file.len = file.len.max(offset + count);
+        file.dirty = true;
+        if !flush_writable_file(index) {
+            return None;
+        }
         Some(count)
     }
 }
@@ -307,7 +361,8 @@ pub fn truncate_ram_file(index: usize, len: usize) -> bool {
             }
         }
         file.len = len;
-        true
+        file.dirty = true;
+        flush_writable_file(index)
     }
 }
 
@@ -316,11 +371,14 @@ pub fn ram_file_index(path: &[u8]) -> Option<usize> {
 }
 
 pub fn remove_ram_file(path: &[u8]) -> bool {
-    let Some(index) = ram_find(path) else {
+    let path = normalized_path_bytes(path).unwrap_or(path);
+    if !remove_disk_file(path) {
         return false;
-    };
+    }
     unsafe {
-        (*RAM_FILES.0.get())[index] = RamFile::empty();
+        if let Some(index) = ram_find(path) {
+            (*RAM_FILES.0.get())[index] = RamFile::empty();
+        }
     }
     true
 }
@@ -350,12 +408,37 @@ fn mount() -> Option<Superblock> {
         block_size,
         inode_count: read_u32(&sector, 16)?,
         inode_table_start: read_u32(&sector, 20)?,
+        inode_table_blocks: read_u32(&sector, 24)?,
+        data_start: read_u32(&sector, 28)?,
         root_inode: read_u32(&sector, 32)?,
+        next_free_block: read_u32(&sector, 36)?,
+        total_blocks: read_u32(&sector, 40).unwrap_or(read_u32(&sector, 36)?),
     };
     unsafe {
         MOUNT_CACHE = Some(fs);
     }
     Some(fs)
+}
+
+fn write_mount(fs: Superblock) -> bool {
+    let mut sector = [0u8; block::SECTOR_SIZE];
+    if !block::read_sector(0, &mut sector) {
+        return false;
+    }
+    write_u32(&mut sector, 16, fs.inode_count);
+    write_u32(&mut sector, 20, fs.inode_table_start);
+    write_u32(&mut sector, 24, fs.inode_table_blocks);
+    write_u32(&mut sector, 28, fs.data_start);
+    write_u32(&mut sector, 32, fs.root_inode);
+    write_u32(&mut sector, 36, fs.next_free_block);
+    write_u32(&mut sector, 40, fs.total_blocks);
+    if !block::write_sector(0, &sector) {
+        return false;
+    }
+    unsafe {
+        MOUNT_CACHE = Some(fs);
+    }
+    true
 }
 
 fn ram_find(path: &[u8]) -> Option<usize> {
@@ -390,10 +473,46 @@ fn valid_absolute_file_path(path: &[u8]) -> bool {
     path.len() > 1 && !path[path.len() - 1..].contains(&b'/')
 }
 
-fn parent_directory_exists(path: &[u8]) -> bool {
-    let Some(path) = normalized_path_bytes(path) else {
-        return false;
+fn create_disk_file(fs: Superblock, path: &[u8]) -> Option<(u32, u32)> {
+    let (parent_path, name) = split_parent_name(path)?;
+    let parent = resolve_path(fs, parent_path)?;
+    if parent.kind != KIND_DIR || find_dir_entry(parent, name).is_some() {
+        return None;
+    }
+
+    let max_inode = fs.inode_table_blocks * block::SECTOR_SIZE as u32 / INODE_SIZE as u32;
+    if fs.inode_count >= max_inode || fs.inode_count >= MAX_INODES {
+        return None;
+    }
+
+    let mut fs = fs;
+    let inode_number = fs.inode_count + 1;
+    fs.inode_count = inode_number;
+    if !write_mount(fs) {
+        return None;
+    }
+
+    let (fs, extent_start) = allocate_blocks(fs, 1)?;
+    let inode = Inode {
+        number: inode_number,
+        kind: KIND_FILE,
+        size: 0,
+        extent_start,
+        extent_blocks: 1,
     };
+    if !write_inode(fs, inode) || !append_dir_entry(fs, parent, name, inode_number, KIND_FILE) {
+        return None;
+    }
+
+    let zero = [0u8; block::SECTOR_SIZE];
+    if !block::write_sector(extent_start, &zero) {
+        return None;
+    }
+    Some((inode_number, extent_start))
+}
+
+fn split_parent_name(path: &[u8]) -> Option<(&[u8], &[u8])> {
+    let path = normalized_path_bytes(path)?;
     let mut slash = 0usize;
     for index in 1..path.len() {
         if path[index] == b'/' {
@@ -401,12 +520,148 @@ fn parent_directory_exists(path: &[u8]) -> bool {
         }
     }
     let parent = if slash == 0 { b"/" } else { &path[..slash] };
+    let name = &path[slash + 1..];
+    if name.is_empty() || name.contains(&b'/') || name.len() > 255 {
+        return None;
+    }
+    Some((parent, name))
+}
+
+fn append_dir_entry(fs: Superblock, mut dir: Inode, name: &[u8], inode: u32, kind: u16) -> bool {
+    if dir.kind != KIND_DIR || dir.size > block::SECTOR_SIZE * 16 {
+        return false;
+    }
+    let record_len = align_up(8 + name.len(), 4);
+    let next_size = dir.size + record_len;
+    if next_size > dir.extent_blocks as usize * block::SECTOR_SIZE
+        || next_size > block::SECTOR_SIZE * 16
+    {
+        return false;
+    }
+    if read_extent(
+        dir.extent_start,
+        dir.size,
+        ptr::addr_of_mut!(DIR_BUFFER).cast(),
+        block::SECTOR_SIZE * 16,
+    )
+    .is_none()
+    {
+        return false;
+    }
+    unsafe {
+        let buffer = &mut *ptr::addr_of_mut!(DIR_BUFFER);
+        write_u32(buffer, dir.size, inode);
+        write_u16(buffer, dir.size + 4, name.len() as u16);
+        write_u16(buffer, dir.size + 6, kind);
+        buffer[dir.size + 8..dir.size + 8 + name.len()].copy_from_slice(name);
+        for byte in &mut buffer[dir.size + 8 + name.len()..next_size] {
+            *byte = 0;
+        }
+        if !write_extent(dir.extent_start, next_size, &buffer[..next_size]) {
+            return false;
+        }
+    }
+    dir.size = next_size;
+    write_inode(fs, dir)
+}
+
+fn remove_disk_file(path: &[u8]) -> bool {
     let Some(fs) = mount() else {
         return false;
     };
-    resolve_path(fs, parent)
-        .map(|inode| inode.kind == KIND_DIR)
-        .unwrap_or(false)
+    let Some((parent_path, name)) = split_parent_name(path) else {
+        return false;
+    };
+    let Some(parent) = resolve_path(fs, parent_path) else {
+        return false;
+    };
+    let Some(inode_number) = remove_dir_entry(parent, name) else {
+        return false;
+    };
+    let inode = Inode {
+        number: inode_number,
+        kind: 0,
+        size: 0,
+        extent_start: 0,
+        extent_blocks: 0,
+    };
+    write_inode(fs, inode)
+}
+
+fn remove_dir_entry(dir: Inode, name: &[u8]) -> Option<u32> {
+    if dir.kind != KIND_DIR || dir.size > block::SECTOR_SIZE * 16 {
+        return None;
+    }
+    read_extent(
+        dir.extent_start,
+        dir.size,
+        ptr::addr_of_mut!(DIR_BUFFER).cast(),
+        block::SECTOR_SIZE * 16,
+    )?;
+    unsafe {
+        let buffer = &mut *ptr::addr_of_mut!(DIR_BUFFER);
+        let mut offset = 0usize;
+        while offset + 8 <= dir.size {
+            let inode = read_u32(buffer, offset)?;
+            let name_len = read_u16(buffer, offset + 4)? as usize;
+            let kind = read_u16(buffer, offset + 6)?;
+            let next = align_up(offset + 8 + name_len, 4);
+            if next > dir.size {
+                return None;
+            }
+            if kind == KIND_FILE && buffer.get(offset + 8..offset + 8 + name_len) == Some(name) {
+                write_u16(buffer, offset + 6, 0);
+                if write_extent(dir.extent_start, dir.size, &buffer[..dir.size]) {
+                    return Some(inode);
+                }
+                return None;
+            }
+            offset = next;
+        }
+    }
+    None
+}
+
+fn flush_writable_file(index: usize) -> bool {
+    if index >= RAM_FILE_COUNT {
+        return false;
+    }
+    let Some(mut fs) = mount() else {
+        return false;
+    };
+    unsafe {
+        let files = &mut *RAM_FILES.0.get();
+        let file = &mut files[index];
+        if !file.used || file.inode == 0 {
+            return false;
+        }
+        let needed_blocks = align_up(file.len.max(1), block::SECTOR_SIZE) / block::SECTOR_SIZE;
+        if needed_blocks > file.extent_blocks as usize {
+            let Some((next_fs, extent_start)) = allocate_blocks(fs, needed_blocks as u32) else {
+                return false;
+            };
+            fs = next_fs;
+            file.extent_start = extent_start;
+            file.extent_blocks = needed_blocks as u32;
+        }
+        if !write_extent(file.extent_start, file.len, &file.data[..file.len]) {
+            return false;
+        }
+        let inode = Inode {
+            number: file.inode,
+            kind: KIND_FILE,
+            size: file.len,
+            extent_start: file.extent_start,
+            extent_blocks: file.extent_blocks,
+        };
+        if !write_inode(fs, inode) {
+            return false;
+        }
+        FILE_CACHE_INODE = 0;
+        SMALL_FILE_CACHE_INODE = 0;
+        file.dirty = false;
+    }
+    true
 }
 
 fn append_ram_dir_entries(path: &[u8], start: usize) -> Option<usize> {
@@ -564,7 +819,48 @@ fn read_inode(fs: Superblock, inode_number: u32) -> Option<Inode> {
         kind: read_u16(&sector, offset)?,
         size: read_u64(&sector, offset + 8)? as usize,
         extent_start: read_u32(&sector, offset + 16)?,
+        extent_blocks: read_u32(&sector, offset + 20)?,
     })
+}
+
+fn write_inode(fs: Superblock, inode: Inode) -> bool {
+    if inode.number == 0
+        || inode.number > fs.inode_count
+        || inode.number > fs.inode_table_blocks * block::SECTOR_SIZE as u32 / INODE_SIZE as u32
+    {
+        return false;
+    }
+    let byte_offset = fs.inode_table_start as usize * fs.block_size as usize
+        + (inode.number as usize - 1) * INODE_SIZE;
+    let lba = byte_offset / block::SECTOR_SIZE;
+    let offset = byte_offset % block::SECTOR_SIZE;
+    if offset + INODE_SIZE > block::SECTOR_SIZE {
+        return false;
+    }
+    let mut sector = [0u8; block::SECTOR_SIZE];
+    if !block::read_sector(lba as u32, &mut sector) {
+        return false;
+    }
+    for byte in &mut sector[offset..offset + INODE_SIZE] {
+        *byte = 0;
+    }
+    write_u16(&mut sector, offset, inode.kind);
+    write_u16(
+        &mut sector,
+        offset + 2,
+        if inode.kind == 0 {
+            0
+        } else if inode.kind == KIND_DIR {
+            0o040555
+        } else {
+            0o100755
+        },
+    );
+    write_u32(&mut sector, offset + 4, 1);
+    write_u64(&mut sector, offset + 8, inode.size as u64);
+    write_u32(&mut sector, offset + 16, inode.extent_start);
+    write_u32(&mut sector, offset + 20, inode.extent_blocks);
+    block::write_sector(lba as u32, &sector)
 }
 
 fn read_extent(start_block: u32, size: usize, out: *mut u8, out_len: usize) -> Option<()> {
@@ -594,6 +890,57 @@ fn read_extent(start_block: u32, size: usize, out: *mut u8, out_len: usize) -> O
         written += count;
     }
     Some(())
+}
+
+fn write_extent(start_block: u32, size: usize, data: &[u8]) -> bool {
+    if size > data.len() {
+        return false;
+    }
+    let sectors = align_up(size.max(1), block::SECTOR_SIZE) / block::SECTOR_SIZE;
+    let mut written = 0usize;
+    while written < sectors * block::SECTOR_SIZE {
+        let chunk_sectors = (sectors - (written / block::SECTOR_SIZE)).min(128);
+        let chunk_bytes = chunk_sectors * block::SECTOR_SIZE;
+        unsafe {
+            let buffer = core::slice::from_raw_parts_mut(
+                ptr::addr_of_mut!(EXTENT_BUFFER).cast(),
+                chunk_bytes,
+            );
+            for byte in buffer.iter_mut() {
+                *byte = 0;
+            }
+            let count = size.saturating_sub(written).min(chunk_bytes);
+            if count > 0 {
+                buffer[..count].copy_from_slice(&data[written..written + count]);
+            }
+            if !block::write_sectors(
+                start_block + (written / block::SECTOR_SIZE) as u32,
+                chunk_sectors,
+                buffer,
+            ) {
+                return false;
+            }
+        }
+        written += chunk_bytes;
+    }
+    true
+}
+
+fn allocate_blocks(mut fs: Superblock, blocks: u32) -> Option<(Superblock, u32)> {
+    if blocks == 0 {
+        return Some((fs, 0));
+    }
+    let start = fs.next_free_block;
+    let next = start.checked_add(blocks)?;
+    if fs.total_blocks != 0 && next > fs.total_blocks {
+        return None;
+    }
+    fs.next_free_block = next;
+    if write_mount(fs) {
+        Some((fs, start))
+    } else {
+        None
+    }
 }
 
 const fn align_up(value: usize, align: usize) -> usize {
@@ -629,4 +976,11 @@ fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset + 1] = raw[1];
     bytes[offset + 2] = raw[2];
     bytes[offset + 3] = raw[3];
+}
+
+fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    let raw = value.to_le_bytes();
+    for (index, byte) in raw.iter().enumerate() {
+        bytes[offset + index] = *byte;
+    }
 }

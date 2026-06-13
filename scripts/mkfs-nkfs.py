@@ -6,6 +6,8 @@ import sys
 BLOCK_SIZE = 512
 INODE_SIZE = 128
 MAGIC = b"NKFSv1\0\0"
+RESERVED_INODES = 256
+MIN_IMAGE_BLOCKS = 131072
 
 KIND_FILE = 1
 KIND_DIR = 2
@@ -132,7 +134,7 @@ def main():
             node.data = encode_directory(node)
 
     inode_table_start = 1
-    inode_table_bytes = len(nodes) * INODE_SIZE
+    inode_table_bytes = max(len(nodes), RESERVED_INODES) * INODE_SIZE
     inode_table_blocks = align(inode_table_bytes, BLOCK_SIZE) // BLOCK_SIZE
     data_start = inode_table_start + inode_table_blocks
 
@@ -144,7 +146,8 @@ def main():
         node.extent_blocks = align(len(node.data), BLOCK_SIZE) // BLOCK_SIZE
         cursor += node.extent_blocks
 
-    image = bytearray(cursor * BLOCK_SIZE)
+    image_blocks = max(cursor, MIN_IMAGE_BLOCKS)
+    image = bytearray(image_blocks * BLOCK_SIZE)
     struct.pack_into(
         "<8sIIIIIII",
         image,
@@ -159,6 +162,7 @@ def main():
         1,
     )
     struct.pack_into("<I", image, 36, cursor)
+    struct.pack_into("<I", image, 40, image_blocks)
 
     for node in nodes:
         offset = inode_table_start * BLOCK_SIZE + (node.inode - 1) * INODE_SIZE

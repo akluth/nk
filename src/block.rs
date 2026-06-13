@@ -50,6 +50,17 @@ pub fn read_sectors(lba: u32, sectors: usize, out: &mut [u8]) -> bool {
     }
 }
 
+pub fn write_sector(lba: u32, data: &[u8; SECTOR_SIZE]) -> bool {
+    write_sectors(lba, 1, data)
+}
+
+pub fn write_sectors(lba: u32, sectors: usize, data: &[u8]) -> bool {
+    match backend() {
+        Backend::Virtio => virtio::write_block_sectors(lba, sectors, data),
+        Backend::Ata | Backend::None => false,
+    }
+}
+
 fn set_backend(backend: Backend) {
     unsafe {
         *BACKEND.0.get() = backend;

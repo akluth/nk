@@ -60,6 +60,7 @@ const SYS_UNAME: u64 = 63;
 const SYS_EXIT: u64 = 60;
 const SYS_CLOCK_GETTIME: u64 = 228;
 const SYS_OPENAT: u64 = 257;
+const SYS_UNLINKAT: u64 = 263;
 const SYS_FACCESSAT: u64 = 269;
 const SYS_SPLICE: u64 = 275;
 const SYS_PIPE2: u64 = 293;
@@ -421,6 +422,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
         }
         SYS_OPENAT => {
             frame.rax = open_at(frame.rdi as i32, frame.rsi as *const u8, frame.rdx) as u64;
+            true
+        }
+        SYS_UNLINKAT => {
+            frame.rax = unlink_at(frame.rdi as i32, frame.rsi as *const u8) as u64;
             true
         }
         SYS_NEWFSTATAT => {
@@ -1613,13 +1618,17 @@ fn chdir(path: *const u8) -> i64 {
 }
 
 fn unlink(path: *const u8) -> i64 {
+    unlink_at(-100, path)
+}
+
+fn unlink_at(dirfd: i32, path: *const u8) -> i64 {
     let mut raw_path = [0u8; 256];
     let raw_len = read_user_cstr(path, &mut raw_path);
     if raw_len == 0 {
         return ENOENT;
     }
     let mut resolved = [0u8; 256];
-    let Some(path_len) = normalize_at_path(-100, &raw_path[..raw_len], &mut resolved, false) else {
+    let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
         return ENOENT;
     };
     if nkfs::remove_ram_file(&resolved[..path_len]) {
