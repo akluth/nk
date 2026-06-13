@@ -30,7 +30,7 @@ const BUFFER_CAP: usize = 32 * 1024;
 const PATH_CAP: usize = 256;
 const SCREEN_COLS: usize = 80;
 const SCREEN_ROWS: usize = 24;
-const TEXT_ROWS: usize = 21;
+const TEXT_ROWS: usize = 20;
 
 static mut BUFFER: [u8; BUFFER_CAP] = [0; BUFFER_CAP];
 static mut PATH: [u8; PATH_CAP] = [0; PATH_CAP];
@@ -64,7 +64,7 @@ fn main(stack: *const u64) -> i32 {
         cursor: 0,
         top_line: 0,
         dirty: false,
-        status: b"Ctrl-S save | Ctrl-X exit",
+        status: b"^ means Ctrl/Strg",
     };
     editor.load();
     editor.render();
@@ -75,7 +75,7 @@ fn main(stack: *const u64) -> i32 {
             CTRL_S => editor.save(),
             CTRL_X => {
                 if editor.dirty {
-                    editor.status = b"Unsaved changes. Ctrl-S saves, Ctrl-X again quits";
+                    editor.status = b"Unsaved changes. ^S saves, ^X again quits";
                     editor.dirty = false;
                     editor.render();
                 } else {
@@ -153,8 +153,12 @@ impl Editor {
             }
         }
 
+        move_cursor(SCREEN_ROWS - 1, 1);
+        write_all(STDOUT, b"^S Speichern    ^X Beenden    Backspace Loeschen    Enter Neue Zeile");
+        write_all(STDOUT, b"\x1b[K");
+
         move_cursor(SCREEN_ROWS, 1);
-        write_all(STDOUT, b"^S Save  ^X Exit  ");
+        write_all(STDOUT, b"Info: ^ bedeutet Ctrl/Strg.  ");
         write_all(STDOUT, self.status);
         write_all(STDOUT, b"\x1b[K");
 
