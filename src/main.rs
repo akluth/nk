@@ -19,6 +19,7 @@ mod pci;
 mod scheduler;
 mod serial;
 mod services;
+mod tty;
 mod userland;
 mod virtio;
 

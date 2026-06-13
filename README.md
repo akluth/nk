@@ -264,6 +264,9 @@ Already done:
   physical frame freelist, with HHDM-backed frame zeroing/copying and explicit
   user-pointer copies for native syscalls.
 - PS/2 keyboard and mouse IRQ paths with small user-facing input syscalls.
+- A first kernel TTY layer with canonical and raw input queues, blocking
+  stdin wakeups, termios raw/canonical switching, `poll` readiness, and a
+  synthetic `/dev/tty` device for Linux ABI programs.
 - A dynamically loaded Spleen 12x24 PSF2 font at `/etc/font.psf`.
 - A framebuffer terminal with incremental row/cell redraws instead of full
   screen redraw on every character.
@@ -287,8 +290,9 @@ Still useful next:
 - Expand the Linux/POSIX ABI with pipes, descriptor duplication, `poll`/`select`,
   signals, termios/TTY handling, process groups, and job-control semantics.
 - Add proper argv/envp/auxv setup for Linux ABI program startup.
-- Move from the current framebuffer console path toward a proper TTY/console
-  subsystem so Bash can become the default shell again without special cases.
+- Expand the TTY/console subsystem with PTYs, process groups, controlling
+  terminals, signals, and job-control semantics so Bash can become the default
+  shell again without special cases.
 - Evolve nkfs toward a journaled or copy-on-write root filesystem with crash
   recovery, fsck tooling, and stronger consistency guarantees.
 - Complete Virtio input drivers beyond discovery and queue setup.

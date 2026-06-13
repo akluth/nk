@@ -732,12 +732,17 @@ extern "C" fn rust_timer_interrupt(frame: *mut scheduler::TrapFrame) {
 #[no_mangle]
 extern "C" fn rust_keyboard_interrupt() {
     let scancode = unsafe { arch::inb(0x60) };
+    let linux_input = matches!(scheduler::current_user_abi(), Some(UserAbi::Linux))
+        || scheduler::stdin_waiter_index().is_some();
     if let Some(byte) = keyboard::decode_scancode(scancode) {
-        keyboard::push_key(byte);
-        if matches!(scheduler::current_user_abi(), Some(UserAbi::Linux))
-            || scheduler::stdin_waiter_index().is_some()
-        {
-            linux_abi::handle_stdin_key(byte);
+        if linux_input {
+            crate::tty::input_byte(byte);
+        } else {
+            keyboard::push_key(byte);
+        }
+    } else if linux_input {
+        while let Some(byte) = keyboard::pop_key() {
+            crate::tty::input_byte(byte);
         }
     }
     unsafe {

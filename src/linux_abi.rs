@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 
-use crate::{arch, keyboard, memory, nkfs, scheduler, serial, services, userland};
+use crate::{arch, memory, nkfs, scheduler, serial, services, tty, userland};
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
@@ -112,6 +112,7 @@ struct OpenFile {
     data: Option<&'static [u8]>,
     offset: usize,
     is_dir: bool,
+    is_tty: bool,
     writable: bool,
     ram_index: usize,
     mode: u32,
@@ -125,6 +126,7 @@ impl OpenFile {
             data: None,
             offset: 0,
             is_dir: false,
+            is_tty: false,
             writable: false,
             ram_index: usize::MAX,
             mode: 0,
@@ -146,19 +148,11 @@ static OPEN_FILES: GlobalOpenFiles = GlobalOpenFiles(UnsafeCell::new(
 ));
 static mut FD_BUFFERS: [[[u8; FD_BUFFER_CAP]; MAX_OPEN_FILES]; scheduler::USER_TASKS] =
     [[[0; FD_BUFFER_CAP]; MAX_OPEN_FILES]; scheduler::USER_TASKS];
-const INPUT_LINE_CAP: usize = 1024;
-const READY_INPUT_CAP: usize = 2048;
-static mut INPUT_LINE: [u8; INPUT_LINE_CAP] = [0; INPUT_LINE_CAP];
-static mut INPUT_LINE_LEN: usize = 0;
-static mut READY_INPUT: [u8; READY_INPUT_CAP] = [0; READY_INPUT_CAP];
-static mut READY_READ: usize = 0;
-static mut READY_WRITE: usize = 0;
 static mut TASK_CWDS: [[u8; 256]; scheduler::USER_TASKS] = [[0; 256]; scheduler::USER_TASKS];
 static mut TASK_CWD_LENS: [usize; scheduler::USER_TASKS] = [0; scheduler::USER_TASKS];
 static mut MMAP_CURSORS: [u64; scheduler::USER_TASKS] = [USER_MMAP_START; scheduler::USER_TASKS];
 static mut PROGRAM_BREAKS: [u64; scheduler::USER_TASKS] = [USER_BRK_START; scheduler::USER_TASKS];
 static mut STDOUT_BUDGETS: [isize; scheduler::USER_TASKS] = [-1; scheduler::USER_TASKS];
-static mut STDIN_RAW: [bool; scheduler::USER_TASKS] = [false; scheduler::USER_TASKS];
 static mut UNKNOWN_LOGS: u64 = 0;
 
 pub fn reset_process_state(index: usize) {
@@ -169,7 +163,7 @@ pub fn reset_process_state(index: usize) {
         MMAP_CURSORS[index] = USER_MMAP_START;
         PROGRAM_BREAKS[index] = USER_BRK_START;
         STDOUT_BUDGETS[index] = -1;
-        STDIN_RAW[index] = false;
+        tty::reset_task(index);
         for file in &mut (*OPEN_FILES.0.get())[index] {
             *file = OpenFile::empty();
         }
@@ -530,6 +524,12 @@ fn open_at(dirfd: i32, path: *const u8, flags: u64) -> i64 {
     }
 
     let mut resolved = [0u8; 256];
+    if let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) {
+        if &resolved[..path_len] == b"/dev/tty" {
+            return open_tty_file(flags);
+        }
+    }
+
     let Some(path_len) = resolve_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
         if flags & O_CREAT == 0 {
             return ENOENT;
@@ -581,6 +581,26 @@ fn open_at(dirfd: i32, path: *const u8, flags: u64) -> i64 {
         file.mode = if meta.kind == 2 { 0o040555 } else { 0o100555 };
         file.path[..path_len].copy_from_slice(&resolved[..path_len]);
         file.path_len = path_len;
+        fd as i64
+    }
+}
+
+fn open_tty_file(flags: u64) -> i64 {
+    unsafe {
+        let Some((fd, file_index)) = alloc_open_file() else {
+            return EMFILE;
+        };
+        let task_index = current_task_index();
+        let file = &mut (*OPEN_FILES.0.get())[task_index][file_index];
+        file.data = Some(&[]);
+        file.offset = 0;
+        file.is_dir = false;
+        file.is_tty = true;
+        file.writable = flags & O_WRONLY != 0 || flags & O_RDWR != 0;
+        file.ram_index = usize::MAX;
+        file.mode = 0o020666;
+        file.path[..8].copy_from_slice(b"/dev/tty");
+        file.path_len = 8;
         fd as i64
     }
 }
@@ -758,6 +778,9 @@ fn read(frame: &mut scheduler::TrapFrame, fd: i32, buffer: *mut u8, len: usize) 
         let Some(file) = open_file(fd) else {
             return Some(EBADF);
         };
+        if file.is_tty {
+            return read_stdin(frame, buffer, len);
+        }
         let Some(data) = file.data else {
             return Some(EBADF);
         };
@@ -776,117 +799,7 @@ fn read(frame: &mut scheduler::TrapFrame, fd: i32, buffer: *mut u8, len: usize) 
 }
 
 fn read_stdin(frame: &mut scheduler::TrapFrame, buffer: *mut u8, len: usize) -> Option<i64> {
-    if len == 0 {
-        return Some(0);
-    }
-
-    if unsafe { STDIN_RAW[current_task_index()] } {
-        if let Some(count) = pop_ready_input(buffer, len) {
-            return Some(count as i64);
-        }
-        if let Some(byte) = keyboard::pop_key() {
-            unsafe {
-                *buffer = byte;
-            }
-            return Some(1);
-        }
-        return Some(EAGAIN);
-    }
-
-    if let Some(count) = pop_ready_input(buffer, len) {
-        return Some(count as i64);
-    }
-
-    if let Some(task_switch) = scheduler::block_current_for_stdin(frame, buffer as u64) {
-        unsafe {
-            crate::arch::load_cr3(task_switch.pml4_phys);
-        }
-        None
-    } else {
-        Some(EAGAIN)
-    }
-}
-
-pub fn handle_stdin_key(byte: u8) {
-    unsafe {
-        let task = scheduler::stdin_waiter_index().unwrap_or_else(current_task_index);
-        if STDIN_RAW[task] {
-            return;
-        }
-        match byte {
-            8 | 127 => {
-                if INPUT_LINE_LEN > 0 {
-                    INPUT_LINE_LEN -= 1;
-                    echo_stdin_key(8);
-                }
-            }
-            b'\n' | b'\r' => {
-                echo_stdin_key(b'\n');
-                push_ready_input(b'\n');
-                INPUT_LINE_LEN = 0;
-                wake_stdin_reader();
-            }
-            byte if byte >= 0x20 && INPUT_LINE_LEN < INPUT_LINE_CAP - 1 => {
-                INPUT_LINE[INPUT_LINE_LEN] = byte;
-                INPUT_LINE_LEN += 1;
-                echo_stdin_key(byte);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn echo_stdin_key(byte: u8) {
-    if byte == 8 || byte == 127 {
-        services::gui::console_write(&[8]);
-    } else {
-        services::gui::console_write(&[byte]);
-    }
-}
-
-unsafe fn push_ready_input(byte: u8) {
-    for index in 0..INPUT_LINE_LEN {
-        let next = (READY_WRITE + 1) % READY_INPUT_CAP;
-        if next == READY_READ {
-            break;
-        }
-        READY_INPUT[READY_WRITE] = INPUT_LINE[index];
-        READY_WRITE = next;
-    }
-    let next = (READY_WRITE + 1) % READY_INPUT_CAP;
-    if next != READY_READ {
-        READY_INPUT[READY_WRITE] = byte;
-        READY_WRITE = next;
-    }
-}
-
-fn pop_ready_input(buffer: *mut u8, len: usize) -> Option<usize> {
-    unsafe {
-        if READY_READ == READY_WRITE {
-            return None;
-        }
-        let mut count = 0usize;
-        while count < len && READY_READ != READY_WRITE {
-            *buffer.add(count) = READY_INPUT[READY_READ];
-            READY_READ = (READY_READ + 1) % READY_INPUT_CAP;
-            count += 1;
-        }
-        Some(count)
-    }
-}
-
-unsafe fn wake_stdin_reader() {
-    if let Some(wake) = scheduler::wake_stdin_waiter() {
-        if READY_READ == READY_WRITE {
-            return;
-        }
-        let byte = READY_INPUT[READY_READ];
-        READY_READ = (READY_READ + 1) % READY_INPUT_CAP;
-        let current_pml4 = arch::read_cr3();
-        arch::load_cr3(wake.pml4_phys);
-        *(wake.buffer as *mut u8) = byte;
-        arch::load_cr3(current_pml4);
-    }
+    tty::read(frame, current_task_index(), buffer, len)
 }
 
 fn write(fd: i32, buffer: *const u8, len: usize) -> i64 {
@@ -939,6 +852,9 @@ fn write_regular_file(fd: i32, buffer: *const u8, len: usize) -> i64 {
         let Some(file) = open_file(fd) else {
             return EBADF;
         };
+        if file.is_tty {
+            return write(1, buffer, len);
+        }
         if !file.writable || file.is_dir || file.ram_index == usize::MAX {
             return EBADF;
         }
@@ -1189,6 +1105,9 @@ fn stat_fd(fd: i32, stat_buf: *mut u8) -> i64 {
             let Some(file) = open_file(fd) else {
                 return EBADF;
             };
+            if file.is_tty {
+                return write_stat(stat_buf, 0o020666, 0);
+            }
             let Some(data) = file.data else {
                 return EBADF;
             };
@@ -1221,6 +1140,12 @@ fn stat_path_at(dirfd: i32, path: *const u8, stat_buf: *mut u8) -> i64 {
     }
     let mut resolved = [0u8; 256];
     let Some(path_len) = resolve_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
+        if let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false)
+        {
+            if &resolved[..path_len] == b"/dev/tty" {
+                return write_stat(stat_buf, 0o020666, 0);
+            }
+        }
         return ENOENT;
     };
     let Some(meta) = nkfs::metadata(&resolved[..path_len]) else {
@@ -1254,6 +1179,12 @@ fn statx(dirfd: i32, path: *const u8, statx_buf: *mut u8) -> i64 {
 
     let mut resolved = [0u8; 256];
     let Some(path_len) = resolve_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
+        if let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false)
+        {
+            if &resolved[..path_len] == b"/dev/tty" {
+                return write_statx(statx_buf, 0o020666, 0);
+            }
+        }
         return ENOENT;
     };
     let Some(meta) = nkfs::metadata(&resolved[..path_len]) else {
@@ -1278,6 +1209,14 @@ fn access_at(dirfd: i32, path: *const u8) -> i64 {
         .or_else(|| resolve_at_path(dirfd, &raw_path[..raw_len], &mut resolved, true));
     if let Some(len) = path_len {
         if nkfs::exists(&resolved[..len]) {
+            return 0;
+        }
+        if &resolved[..len] == b"/dev/tty" {
+            return 0;
+        }
+    }
+    if let Some(len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) {
+        if &resolved[..len] == b"/dev/tty" {
             return 0;
         }
     }
@@ -1465,7 +1404,14 @@ fn basename_bytes(path: &[u8]) -> &[u8] {
 
 fn ioctl(fd: i32, request: u64, argp: *mut u8) -> i64 {
     if fd != 0 && fd != 1 && fd != 2 {
-        return EBADF;
+        unsafe {
+            let Some(file) = open_file(fd) else {
+                return EBADF;
+            };
+            if !file.is_tty {
+                return EBADF;
+            }
+        }
     }
 
     match request {
@@ -1491,13 +1437,24 @@ fn poll(fds: *mut u8, count: usize) -> i64 {
             let events = read_user_i16(base.add(4));
             let mut revents = 0i16;
             if fd == 0 && events & 1 != 0 {
-                if READY_READ != READY_WRITE || keyboard::has_key() {
+                if tty::has_input() {
                     revents |= 1;
                 }
             } else if (fd == 1 || fd == 2) && events & 4 != 0 {
                 revents |= 4;
-            } else if fd >= FIRST_USER_FD && events != 0 && open_file(fd).is_some() {
-                revents |= events & 5;
+            } else if fd >= FIRST_USER_FD && events != 0 {
+                if let Some(file) = open_file(fd) {
+                    if file.is_tty {
+                        if events & 1 != 0 && tty::has_input() {
+                            revents |= 1;
+                        }
+                        if events & 4 != 0 {
+                            revents |= 4;
+                        }
+                    } else {
+                        revents |= events & 5;
+                    }
+                }
             }
             if revents != 0 {
                 ready += 1;
@@ -1577,7 +1534,7 @@ fn write_termios(argp: *mut u8) -> i64 {
         let iflag = 0u32.to_le_bytes();
         let oflag = 1u32.to_le_bytes();
         let cflag = 0xbf_u32.to_le_bytes();
-        let raw = STDIN_RAW[current_task_index()];
+        let raw = tty::is_raw(current_task_index());
         let lflag_value = if raw { 0u32 } else { 0x8a3b_u32 };
         let lflag = lflag_value.to_le_bytes();
         for (index, byte) in iflag.iter().enumerate() {
@@ -1603,7 +1560,7 @@ fn set_termios(argp: *mut u8) -> i64 {
     }
     unsafe {
         let lflag = read_user_u32(argp.add(12));
-        STDIN_RAW[current_task_index()] = lflag & 0x0a == 0;
+        tty::set_raw(current_task_index(), lflag & 0x0a == 0);
     }
     0
 }

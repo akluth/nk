@@ -33,10 +33,6 @@ impl KeyboardBuffer {
         Some(byte)
     }
 
-    fn has_key(&self) -> bool {
-        self.read != self.write
-    }
-
     fn push(&mut self, byte: u8) {
         let next = (self.write + 1) % BUFFER_LEN;
         if next == self.read {
@@ -115,10 +111,6 @@ pub fn decode_scancode(scancode: u8) -> Option<u8> {
 
 pub fn pop_key() -> Option<u8> {
     unsafe { (*KEYBOARD.0.get()).pop() }
-}
-
-pub fn has_key() -> bool {
-    unsafe { (*KEYBOARD.0.get()).has_key() }
 }
 
 pub fn push_key(byte: u8) {
