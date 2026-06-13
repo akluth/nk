@@ -252,8 +252,18 @@ pub mod gui {
         }
         TERM_BYTES[rows - 1] = [0; TERM_MAX_COLS];
         TERM_LENS[rows - 1] = 0;
-        with_framebuffer(|fb| fb.scroll_up(term_line_h(), Color(TERM_BG)));
-        TERM_DIRTY[rows - 1] = true;
+        with_framebuffer(|fb| {
+            fb.rect(
+                0,
+                0,
+                cols * font::advance(),
+                rows * term_line_h(),
+                Color(TERM_BG),
+            )
+        });
+        for row in 0..rows {
+            TERM_DIRTY[row] = true;
+        }
     }
 
     unsafe fn handle_ansi_byte(byte: u8, cols: usize) -> bool {
