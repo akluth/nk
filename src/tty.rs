@@ -12,6 +12,7 @@ struct TtyState {
     read: usize,
     write: usize,
     raw: [bool; scheduler::USER_TASKS],
+    foreground_pgid: u64,
 }
 
 impl TtyState {
@@ -23,6 +24,7 @@ impl TtyState {
             read: 0,
             write: 0,
             raw: [false; scheduler::USER_TASKS],
+            foreground_pgid: 1,
         }
     }
 
@@ -77,6 +79,20 @@ pub fn is_raw(index: usize) -> bool {
 
 pub fn has_input() -> bool {
     unsafe { (*TTY.0.get()).has_ready() }
+}
+
+pub fn foreground_pgid() -> u64 {
+    unsafe { (*TTY.0.get()).foreground_pgid }
+}
+
+pub fn set_foreground_pgid(pgid: u64) -> bool {
+    if pgid == 0 {
+        return false;
+    }
+    unsafe {
+        (*TTY.0.get()).foreground_pgid = pgid;
+    }
+    true
 }
 
 pub fn read(

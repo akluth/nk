@@ -277,6 +277,10 @@ Already done:
   `dup3`, `fcntl(F_DUPFD)`, `pipe`, `pipe2`, pipe FD inheritance across
   `fork`, FD preservation across `execve`, and blocking pipe reads with
   writer wakeups.
+- A first process-group/session model for Linux ABI tasks, including inherited
+  process groups across `fork`, `getpgrp`, `getpgid`, `setpgid`, `setsid`,
+  `getsid`, and TTY foreground process-group ioctls used by `tcgetpgrp` and
+  `tcsetpgrp`.
 - `/bin/pipecheck`, a small Linux ABI test program that validates a real
   `pipe` + `fork` + `dup2` + `execve` pipeline through Coreutils `echo` and
   `cat`.
@@ -302,9 +306,9 @@ Still useful next:
   descriptor table and dynamically allocated page-table roots.
 - Expand the Linux/POSIX ABI with `select`, signal delivery, richer termios
   behavior, process groups, and job-control semantics.
-- Expand the TTY/console subsystem with PTYs, process groups, controlling
-  terminals, signals, and job-control semantics so Bash can become the default
-  shell again without special cases.
+- Expand the TTY/console subsystem with PTYs, controlling terminals, signal
+  delivery, and full job-control semantics so Bash can become the default shell
+  again without special cases.
 - Evolve nkfs toward a journaled or copy-on-write root filesystem with crash
   recovery, fsck tooling, and stronger consistency guarantees.
 - Complete Virtio input drivers beyond discovery and queue setup.

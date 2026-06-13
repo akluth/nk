@@ -46,7 +46,12 @@ const SYS_GETUID: u64 = 102;
 const SYS_GETGID: u64 = 104;
 const SYS_GETEUID: u64 = 107;
 const SYS_GETEGID: u64 = 108;
+const SYS_SETPGID: u64 = 109;
 const SYS_GETPPID: u64 = 110;
+const SYS_GETPGRP: u64 = 111;
+const SYS_SETSID: u64 = 112;
+const SYS_GETPGID: u64 = 121;
+const SYS_GETSID: u64 = 124;
 const SYS_TKILL: u64 = 200;
 const SYS_ARCH_PRCTL: u64 = 158;
 const SYS_GETXATTR: u64 = 191;
@@ -97,6 +102,8 @@ const ENOSYS: i64 = -38;
 const EAGAIN: i64 = -11;
 const EMFILE: i64 = -24;
 const ENODATA: i64 = -61;
+const ESRCH: i64 = -3;
+const EPERM: i64 = -1;
 
 const O_WRONLY: u64 = 1;
 const O_RDWR: u64 = 2;
@@ -393,6 +400,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = scheduler::current_user_pid().unwrap_or(1);
             true
         }
+        SYS_SETPGID => {
+            frame.rax = setpgid(frame.rdi, frame.rsi) as u64;
+            true
+        }
         SYS_FORK => {
             frame.rax = fork(frame) as u64;
             true
@@ -492,6 +503,22 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
         }
         SYS_GETPPID => {
             frame.rax = scheduler::current_user_parent_pid().unwrap_or(0);
+            true
+        }
+        SYS_GETPGRP => {
+            frame.rax = scheduler::current_user_process_group().unwrap_or(1);
+            true
+        }
+        SYS_SETSID => {
+            frame.rax = setsid() as u64;
+            true
+        }
+        SYS_GETPGID => {
+            frame.rax = getpgid(frame.rdi) as u64;
+            true
+        }
+        SYS_GETSID => {
+            frame.rax = getsid(frame.rdi) as u64;
             true
         }
         SYS_ARCH_PRCTL => {
@@ -1886,6 +1913,8 @@ fn ioctl(fd: i32, request: u64, argp: *mut u8) -> i64 {
         0x5401 => write_termios(argp),
         0x5402 | 0x5403 | 0x5404 => set_termios(argp),
         0x5405 | 0x5406 | 0x5413 => write_winsize(argp),
+        0x540f => write_tty_pgrp(argp),
+        0x5410 => set_tty_pgrp(argp),
         _ => 0,
     }
 }
@@ -2052,6 +2081,31 @@ fn set_termios(argp: *mut u8) -> i64 {
         tty::set_raw(current_task_index(), lflag & 0x0a == 0);
     }
     0
+}
+
+fn write_tty_pgrp(argp: *mut u8) -> i64 {
+    if argp.is_null() {
+        return EFAULT;
+    }
+    unsafe {
+        write_user_i32(argp, tty::foreground_pgid() as i32);
+    }
+    0
+}
+
+fn set_tty_pgrp(argp: *mut u8) -> i64 {
+    if argp.is_null() {
+        return EFAULT;
+    }
+    let pgid = unsafe { read_user_i32(argp) };
+    if pgid <= 0 {
+        return EINVAL;
+    }
+    if tty::set_foreground_pgid(pgid as u64) {
+        0
+    } else {
+        EINVAL
+    }
 }
 
 fn write_winsize(argp: *mut u8) -> i64 {
@@ -2306,6 +2360,29 @@ fn getrandom(buffer: *mut u8, len: usize) -> i64 {
         }
     }
     count as i64
+}
+
+fn getpgid(pid: u64) -> i64 {
+    scheduler::process_group_for_pid(pid).map_or(ESRCH, |pgid| pgid as i64)
+}
+
+fn setpgid(pid: u64, pgid: u64) -> i64 {
+    if scheduler::set_process_group(pid, pgid) {
+        0
+    } else {
+        EPERM
+    }
+}
+
+fn setsid() -> i64 {
+    scheduler::create_session().map_or(EPERM, |sid| {
+        let _ = tty::set_foreground_pgid(sid);
+        sid as i64
+    })
+}
+
+fn getsid(pid: u64) -> i64 {
+    scheduler::session_for_pid(pid).map_or(ESRCH, |sid| sid as i64)
 }
 
 fn arch_prctl(code: u64, address: u64) -> i64 {

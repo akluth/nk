@@ -51,6 +51,9 @@ struct UserTask {
     name: &'static str,
     pid: u64,
     parent_pid: u64,
+    process_group: u64,
+    session: u64,
+    session_leader: bool,
     abi: UserAbi,
     pml4_phys: u64,
     initial_frame: TrapFrame,
@@ -99,6 +102,9 @@ impl UserTask {
             name: "",
             pid: 0,
             parent_pid: 0,
+            process_group: 0,
+            session: 0,
+            session_leader: false,
             abi: UserAbi::Native,
             pml4_phys: 0,
             initial_frame: Self::EMPTY_FRAME,
@@ -233,6 +239,12 @@ impl UserScheduler {
             self.current_pid().unwrap_or(0)
         };
         let pid = if index == 0 { 1 } else { self.alloc_pid() };
+        let process_group = pid;
+        let session = if index == 0 {
+            pid
+        } else {
+            self.current_session().unwrap_or(pid)
+        };
         let Some(task) = self.task_mut(index) else {
             return;
         };
@@ -240,6 +252,9 @@ impl UserScheduler {
             name,
             pid,
             parent_pid,
+            process_group,
+            session,
+            session_leader: index == 0,
             abi,
             pml4_phys,
             initial_frame: frame,
@@ -497,6 +512,9 @@ impl UserScheduler {
         child_task.name = "child";
         child_task.pid = child_pid;
         child_task.parent_pid = parent_pid;
+        child_task.process_group = parent.process_group;
+        child_task.session = parent.session;
+        child_task.session_leader = false;
         child_task.pml4_phys = child_pml4;
         child_task.frame = *frame;
         child_task.frame.rax = 0;
@@ -588,6 +606,104 @@ impl UserScheduler {
         }
     }
 
+    fn current_process_group(&self) -> Option<u64> {
+        if !self.is_ready() || self.installed == 0 {
+            None
+        } else {
+            let pgid = self.task(self.current)?.process_group;
+            if pgid == 0 {
+                None
+            } else {
+                Some(pgid)
+            }
+        }
+    }
+
+    fn current_session(&self) -> Option<u64> {
+        if !self.is_ready() || self.installed == 0 {
+            None
+        } else {
+            let session = self.task(self.current)?.session;
+            if session == 0 {
+                None
+            } else {
+                Some(session)
+            }
+        }
+    }
+
+    fn task_index_by_pid(&self, pid: u64) -> Option<usize> {
+        if pid == 0 {
+            return Some(self.current);
+        }
+        for index in 0..self.installed {
+            let task = self.task(index)?;
+            if task.pid == pid {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    fn process_group_for_pid(&self, pid: u64) -> Option<u64> {
+        let index = self.task_index_by_pid(pid)?;
+        let pgid = self.task(index)?.process_group;
+        if pgid == 0 {
+            None
+        } else {
+            Some(pgid)
+        }
+    }
+
+    fn session_for_pid(&self, pid: u64) -> Option<u64> {
+        let index = self.task_index_by_pid(pid)?;
+        let session = self.task(index)?.session;
+        if session == 0 {
+            None
+        } else {
+            Some(session)
+        }
+    }
+
+    fn set_process_group(&mut self, pid: u64, pgid: u64) -> bool {
+        if !self.is_ready() {
+            return false;
+        }
+        let Some(index) = self.task_index_by_pid(pid) else {
+            return false;
+        };
+        let target = if pgid == 0 {
+            self.task(index).map_or(0, |task| task.pid)
+        } else {
+            pgid
+        };
+        let current_session = self.current_session().unwrap_or(0);
+        let Some(task) = self.task_mut(index) else {
+            return false;
+        };
+        if target == 0 || task.session != current_session || task.session_leader {
+            return false;
+        }
+        task.process_group = target;
+        true
+    }
+
+    fn create_session(&mut self) -> Option<u64> {
+        if !self.is_ready() || self.installed == 0 {
+            return None;
+        }
+        let task = self.task(self.current)?;
+        let pid = task.pid;
+        if pid == 0 || task.process_group == pid {
+            return None;
+        }
+        let task = self.task_mut(self.current)?;
+        task.session = pid;
+        task.process_group = pid;
+        task.session_leader = true;
+        Some(pid)
+    }
+
     fn current_pml4(&self) -> Option<u64> {
         if !self.is_ready() || self.installed == 0 {
             None
@@ -645,6 +761,9 @@ impl UserScheduler {
                 exiting_task.zombie = false;
                 exiting_task.pid = 0;
                 exiting_task.parent_pid = 0;
+                exiting_task.process_group = 0;
+                exiting_task.session = 0;
+                exiting_task.session_leader = false;
                 awakened_parent = Some(parent);
                 break;
             }
@@ -744,6 +863,9 @@ impl UserScheduler {
             child_task.waiting_child = false;
             child_task.pid = 0;
             child_task.parent_pid = 0;
+            child_task.process_group = 0;
+            child_task.session = 0;
+            child_task.session_leader = false;
             self.write_wait_status(self.current, status);
             return WaitResult::Exited(child_pid);
         }
@@ -844,6 +966,9 @@ impl UserScheduler {
             task.wait_pid = 0;
             task.pid = 0;
             task.parent_pid = 0;
+            task.process_group = 0;
+            task.session = 0;
+            task.session_leader = false;
         }
     }
 }
@@ -1020,6 +1145,26 @@ pub fn current_user_pid() -> Option<u64> {
 
 pub fn current_user_parent_pid() -> Option<u64> {
     unsafe { (*USER_SCHEDULER.0.get()).current_parent_pid() }
+}
+
+pub fn current_user_process_group() -> Option<u64> {
+    unsafe { (*USER_SCHEDULER.0.get()).current_process_group() }
+}
+
+pub fn process_group_for_pid(pid: u64) -> Option<u64> {
+    unsafe { (*USER_SCHEDULER.0.get()).process_group_for_pid(pid) }
+}
+
+pub fn session_for_pid(pid: u64) -> Option<u64> {
+    unsafe { (*USER_SCHEDULER.0.get()).session_for_pid(pid) }
+}
+
+pub fn set_process_group(pid: u64, pgid: u64) -> bool {
+    unsafe { (*USER_SCHEDULER.0.get()).set_process_group(pid, pgid) }
+}
+
+pub fn create_session() -> Option<u64> {
+    unsafe { (*USER_SCHEDULER.0.get()).create_session() }
 }
 
 pub fn current_user_pml4() -> Option<u64> {
