@@ -10,15 +10,17 @@ const SYS_WRITE: u64 = 40;
 const SYS_LS: u64 = 41;
 const SYS_IS_DIR: u64 = 43;
 const SYS_SPAWN_WAIT: u64 = 44;
+const SYS_WRITE_FILE: u64 = 47;
 
 const LINE_CAP: usize = 256;
 const CWD_CAP: usize = 256;
+const EDIT_CAP: usize = 4096;
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     let mut shell = Shell::new();
     shell.write(b"nk shell ready\n");
-    shell.write(b"type: ls, ls /bin, cat /hello.txt, cd /bin, pwd, version, shutdown\n");
+    shell.write(b"type: ls, cat, edit, nasm, cd, pwd, version, shutdown\n");
     loop {
         shell.prompt();
         shell.read_line();
@@ -31,6 +33,7 @@ struct Shell {
     line_len: usize,
     cwd: [u8; CWD_CAP],
     cwd_len: usize,
+    edit: [u8; EDIT_CAP],
 }
 
 impl Shell {
@@ -42,6 +45,7 @@ impl Shell {
             line_len: 0,
             cwd,
             cwd_len: 1,
+            edit: [0; EDIT_CAP],
         }
     }
 
@@ -85,7 +89,7 @@ impl Shell {
         }
         let (cmd, arg) = split_first(line);
         match cmd {
-            b"help" => self.write(b"commands: ls cd pwd version shutdown; external: echo cat coreutils...\n"),
+            b"help" => self.write(b"commands: ls cat edit cd pwd version shutdown; external: nasm echo coreutils...\n"),
             b"version" => self.write(b"nk userspace shell 0.1\n"),
             b"pwd" => {
                 self.write(&self.cwd[..self.cwd_len]);
@@ -98,6 +102,10 @@ impl Shell {
                 }
             }
             b"cat" | b"echo" => self.run_external(cmd, arg),
+            b"edit" => {
+                let path = arg.map(|value| self.resolve_arg(value));
+                self.edit_file(path);
+            }
             b"cd" => {
                 let path = self.resolve_arg(arg.unwrap_or(b"/"));
                 if syscall2(SYS_IS_DIR, path.as_ptr() as u64, path.len() as u64) == 0 {
@@ -135,6 +143,43 @@ impl Shell {
             arg.as_ptr() as u64,
             arg.len() as u64,
         );
+    }
+
+    fn edit_file(&mut self, path: Option<Path>) {
+        let Some(path) = path else {
+            self.write(b"usage: edit PATH\n");
+            return;
+        };
+        self.write(b"enter text, finish with a single '.' line\n");
+        let mut len = 0usize;
+        loop {
+            self.write(b"> ");
+            self.read_line();
+            let line = trim(&self.line[..self.line_len]);
+            if line == b"." {
+                break;
+            }
+            if len + self.line_len + 1 > EDIT_CAP {
+                self.write(b"edit: buffer full\n");
+                break;
+            }
+            self.edit[len..len + self.line_len].copy_from_slice(&self.line[..self.line_len]);
+            len += self.line_len;
+            self.edit[len] = b'\n';
+            len += 1;
+        }
+        if syscall4(
+            SYS_WRITE_FILE,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            self.edit.as_ptr() as u64,
+            len as u64,
+        ) == 0
+        {
+            self.write(b"saved\n");
+        } else {
+            self.write(b"edit: save failed\n");
+        }
     }
 
     fn resolve_command(&self, cmd: &[u8]) -> Path {

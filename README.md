@@ -3,7 +3,7 @@
 `nk` is a tiny x86-64 operating system written in Rust. It boots through the
 Limine bootloader on BIOS and UEFI systems, brings up a small microkernel-style
 core, starts Ring 3 tasks, and loads user programs as ELF files from a small
-read-only nkfs root filesystem disk.
+nkfs root filesystem disk with a RAM-backed writable overlay.
 
 ## Current Status
 
@@ -12,8 +12,11 @@ read-only nkfs root filesystem disk.
 - Builds a dedicated userland page-table root.
 - Starts Ring 3 tasks through `iretq` and saved trapframes.
 - Uses timer interrupt trapframes as scheduler context.
-- Builds a read-only nkfs root disk containing `/bin/bash`, `/bin/gui`,
-  `/bin/taskview`, uutils Coreutils command aliases, plus small data files.
+- Builds a nkfs root disk containing `/bin/bash`, `/bin/gui`, `/bin/taskview`,
+  `/bin/nasm`, uutils Coreutils command aliases, plus small data files.
+- Provides a RAM-backed writable overlay across the visible nkfs namespace, so
+  user programs can create and overwrite regular files under existing
+  directories such as `/home/root`.
 - Reads that nkfs disk through a first ATA PIO block-device path.
 - Parses userland ELF files from the nkfs root disk and starts them as
   Ring 3 tasks.
@@ -32,6 +35,9 @@ read-only nkfs root filesystem disk.
 - Includes a GNU Bash port under `ports/bash`; the port fetches upstream Bash
   5.3 sources into ignored `third_party` storage and builds a static
   `x86_64-linux-musl` ELF linked at `0x40000000`.
+- Includes a NASM 2.16.03 port under `ports/nasm`; the port fetches upstream
+  NASM sources into ignored `third_party` storage and builds a static
+  `x86_64-linux-musl` ELF linked at `0x40000000`.
 - Loads a Spleen 12x24 PSF2 monospace font from `/etc/font.psf` on the nkfs
   root disk instead of compiling the font bitmap into the kernel.
 - Tracks a generic focused user-task slot so userland can build taskbar/window
@@ -41,6 +47,9 @@ read-only nkfs root filesystem disk.
 - `nsh` can start Coreutils commands on demand through the minimal
   `fork`/`execve`/`wait4` path; examples such as `ls /bin`, `echo ok`, and
   `cat /hello.txt` run against the nkfs root disk.
+- `nsh` has a tiny `edit <path>` command for creating text files in the
+  writable overlay, and `/bin/nasm` can assemble `/home/root/hello.asm` into a
+  new executable that immediately runs in Ring 3.
 
 ## Architecture
 
@@ -54,16 +63,18 @@ read-only nkfs root filesystem disk.
 - `src/scheduler.rs`: minimal kernel scheduler plus trapframe-based user task
   scheduling.
 - `src/ata.rs`: first ATA PIO sector reader for the QEMU root disk.
-- `src/nkfs.rs`: tiny read-only nkfs reader with UNIX-like absolute paths.
+- `src/nkfs.rs`: tiny nkfs reader with UNIX-like absolute paths and a
+  RAM-backed writable regular-file overlay.
 - `src/userland.rs`: address-space model, ELF loader, task frame setup, CR3
   switch, and Ring 3 entry.
 - `src/services.rs`: kernel-side framebuffer service used by GUI syscalls.
 - `src/mouse.rs`: tiny PS/2 mouse packet decoder.
 - `src/linux_abi.rs`: Linux/POSIX syscall compatibility path for Linux ABI
   user tasks, including basic file I/O, keyboard-backed stdin, `writev`,
-  `openat`, `stat`, `fstat`, `lseek`, `brk`, `mmap`, `readlink`, `uname`,
-  `getcwd`, `access`, `fcntl`, `ioctl`, UID/GID queries, signal setup stubs,
-  time syscalls, and exit syscalls.
+  `pwrite64`, `openat`, `stat`, `fstat`, `lseek`, `truncate`, `ftruncate`,
+  `brk`, file-backed and anonymous `mmap`, `readlink`, `uname`, `getcwd`,
+  `access`, `fcntl`, `ioctl`, resource-limit queries, UID/GID queries, signal
+  setup stubs, time syscalls, and exit syscalls.
 - `src/font.rs`: small PSF2 font loader used by the framebuffer console.
 - `src/framebuffer.rs`: low-level pixel and rectangle drawing.
 - `src/limine.rs`: Limine framebuffer, HHDM, and kernel address requests.
@@ -75,6 +86,7 @@ read-only nkfs root filesystem disk.
 - `user/taskview/src/main.rs`: separate no_std Rust task viewer executable.
 - `user/taskview/linker.ld`: task viewer ELF linker script.
 - `ports/bash/`: fetch/build glue for the real GNU Bash port.
+- `ports/nasm/`: fetch/build glue for the real NASM port.
 - `ports/coreutils/`: fetch/build glue for the Rust uutils Coreutils port and
   the command alias list installed into `/bin` on the nkfs root disk.
 - `scripts/mkfs-nkfs.py`: host-side nkfs image builder.
@@ -120,8 +132,10 @@ The build script creates both:
 - `build/user/nsh.elf`: native shell started by init as the standard terminal.
 - `build/user/bash.elf`: GNU Bash executable; the normal build fetches/builds
   it on demand and copies it to the root disk as `/bin/bash`.
-- `build/nk-root.nkfs`: the read-only nkfs root disk containing `/bin`,
-  `/etc`, `/home/root`, user programs, and small data files.
+- `build/user/nasm.elf`: NASM executable; the normal build fetches/builds it
+  on demand and copies it to the root disk as `/bin/nasm`.
+- `build/nk-root.nkfs`: the nkfs root disk containing `/bin`, `/etc`,
+  `/home/root`, user programs, and small data files.
 
 The ISO only contains the kernel and bootloader files. User programs are loaded
 from the nkfs root disk at runtime.
@@ -132,6 +146,33 @@ official uutils `x86_64-unknown-linux-musl` release asset into ignored
 build, MSYS2 `make`, MSYS2 `gcc` for host build tools, and portable Zig for the
 static Musl target; the build script downloads Zig and Bash sources into
 ignored `third_party` storage when needed. See `ports/bash/PORT.md`.
+Building NASM also requires network access on the first build to download the
+official NASM source archive into ignored `third_party` storage. See
+`ports/nasm/PORT.md`.
+
+## Assemble in nk
+
+After booting, `nsh` can assemble and run a tiny ELF program entirely inside the
+OS:
+
+```text
+# nasm -f bin /home/root/hello.asm -o /home/root/hello
+# /home/root/hello
+hello from nasm on nk
+```
+
+You can create or replace small source files with `edit`:
+
+```text
+# edit /home/root/test.asm
+; finish the file with a single dot on its own line
+.
+saved
+```
+
+Files written this way currently live in the RAM overlay, so they are visible
+to subsequent commands in the same boot session but are not persisted back into
+the nkfs disk image yet.
 
 ## Run in QEMU
 
@@ -182,14 +223,19 @@ Already done:
 - Isolated user page-table roots for the current user process table.
 - A first init process (`/bin/init`) that starts the default native shell
   (`/bin/nsh`) instead of making the kernel depend on a shell implementation.
-- A read-only nkfs root disk with UNIX-like absolute paths, `/bin`, `/etc`,
+- A nkfs root disk with UNIX-like absolute paths, `/bin`, `/etc`,
   `/home/root`, `/hello.txt`, `/bin/init`, `/bin/nsh`, `/bin/bash`, `/bin/gui`,
-  `/bin/taskview`, and uutils Coreutils aliases.
+  `/bin/taskview`, `/bin/nasm`, and uutils Coreutils aliases.
+- A RAM-backed writable overlay across the nkfs namespace for regular files,
+  including `open(O_CREAT)`, `write`, `writev`, `pwrite64`, `truncate`,
+  `ftruncate`, `unlink`, directory listing integration, and file-backed `mmap`.
 - ELF loading from the nkfs root disk for native no_std programs and static
   Linux ABI programs.
 - Optional separate GUI and task viewer binaries loaded from `/bin`; they are
   no longer mandatory boot-time kernel payloads.
 - Rust uutils Coreutils integration with command aliases in `/bin`.
+- Real NASM integration as `/bin/nasm`, with an in-OS workflow that assembles
+  `/home/root/hello.asm` into `/home/root/hello` and executes the result.
 - A minimal Linux/POSIX ABI path with enough file, directory, process, memory,
   and terminal syscalls to run useful static userland tools.
 - Minimal `fork`/`execve`/`wait4` support so the shell can launch external
@@ -231,7 +277,9 @@ Still useful next:
 - Add proper argv/envp/auxv setup for Linux ABI program startup.
 - Move from the current framebuffer console path toward a proper TTY/console
   subsystem so Bash can become the default shell again without special cases.
-- Add writable filesystem support or a second writable layer on top of nkfs.
+- Persist the current writable overlay back to disk, add directory mutation
+  (`mkdir`, `rmdir`, `rename`), and evolve nkfs toward a journaled or
+  copy-on-write root filesystem.
 - Complete Virtio input drivers beyond discovery and queue setup.
 - Give GUI applications private window buffers and route them through a real
   compositor/window manager instead of shared framebuffer drawing.

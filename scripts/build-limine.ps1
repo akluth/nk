@@ -85,6 +85,18 @@ function Ensure-Coreutils {
     }
 }
 
+function Ensure-Nasm {
+    $NasmOut = Join-Path $Build "user\nasm.elf"
+    $NasmSource = Join-Path $Root "third_party\nasm-2.16.03"
+    if (-not (Test-Path $NasmSource)) {
+        Invoke-Checked -FilePath powershell -Arguments @("-ExecutionPolicy", "Bypass", "-File", (Join-Path $Root "ports\nasm\fetch-nasm.ps1"))
+    }
+    Invoke-Checked -FilePath powershell -Arguments @("-ExecutionPolicy", "Bypass", "-File", (Join-Path $Root "ports\nasm\build-nasm.ps1"))
+    if (-not (Test-Path $NasmOut)) {
+        throw "NASM wurde nicht gebaut. Erwartet: $NasmOut"
+    }
+}
+
 function Coreutils-AppFiles {
     $CoreutilsOut = Join-Path $Build "user\coreutils.elf"
     $List = Join-Path $Root "ports\coreutils\coreutils-apps.txt"
@@ -134,13 +146,16 @@ Build-UserProgram "init"
 Build-UserProgram "nsh"
 Ensure-Coreutils
 Ensure-BashProgram
+Ensure-Nasm
 
 $GuiElf = Join-Path $Build "user\gui.elf"
 $TaskviewElf = Join-Path $Build "user\taskview.elf"
 $NshElf = Join-Path $Build "user\nsh.elf"
 $InitElf = Join-Path $Build "user\init.elf"
 $BashElf = Join-Path $Build "user\bash.elf"
+$NasmElf = Join-Path $Build "user\nasm.elf"
 $HelloTxt = Join-Path $Root "apps\HELLO.TXT"
+$HelloAsm = Join-Path $Root "apps\hello.asm"
 $FontPsf = Join-Path $Root "apps\font.psf"
 $AppFiles = @(
     "$GuiElf=/bin/gui",
@@ -150,9 +165,12 @@ $AppFiles = @(
     "$InitElf=/bin/init",
     "$NshElf=/bin/nsh",
     "$BashElf=/bin/bash",
+    "$NasmElf=/bin/nasm",
     "$FontPsf=/etc/font.psf",
     "$HelloTxt=/hello.txt",
-    "$HelloTxt=/HELLO.TXT"
+    "$HelloTxt=/HELLO.TXT",
+    "$HelloAsm=/home/root/hello.asm",
+    "$HelloAsm=/hello.asm"
 )
 $AppFiles += Coreutils-AppFiles
 

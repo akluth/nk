@@ -943,6 +943,19 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
             };
             return;
         }
+        47 => {
+            frame.rax = if native_write_file(
+                frame.rdi as *const u8,
+                frame.rsi as usize,
+                frame.rdx as *const u8,
+                frame.r10 as usize,
+            ) {
+                0
+            } else {
+                1
+            };
+            return;
+        }
         32 => unsafe {
             serial::write_line("nk: shutdown requested");
             arch::outw(0x604, 0x2000);
@@ -1059,13 +1072,17 @@ fn native_spawn(
     };
 
     let name = basename(path);
-    let mut argv: [&[u8]; 2] = [name, b""];
-    let argc = if let Some(arg_slice) = arg_slice {
-        argv[1] = arg_slice;
-        2
-    } else {
-        1
-    };
+    let mut arg_words = [[0u8; 96]; 7];
+    let mut arg_lens = [0usize; 7];
+    let mut argc = 1usize;
+    if let Some(arg_slice) = arg_slice {
+        argc += split_args(arg_slice, &mut arg_words, &mut arg_lens);
+    }
+    let mut argv: [&[u8]; 8] = [b"", b"", b"", b"", b"", b"", b"", b""];
+    argv[0] = name;
+    for index in 1..argc {
+        argv[index] = &arg_words[index - 1][..arg_lens[index - 1]];
+    }
 
     let Some(child_slot) = scheduler::allocate_child_slot() else {
         native_console_write(
@@ -1088,6 +1105,52 @@ fn native_spawn(
         }
     }
     true
+}
+
+fn split_args(input: &[u8], out: &mut [[u8; 96]; 7], lens: &mut [usize; 7]) -> usize {
+    let mut count = 0usize;
+    let mut cursor = 0usize;
+    while cursor < input.len() && count < out.len() {
+        while cursor < input.len() && input[cursor] == b' ' {
+            cursor += 1;
+        }
+        if cursor >= input.len() {
+            break;
+        }
+        let start = cursor;
+        while cursor < input.len() && input[cursor] != b' ' {
+            cursor += 1;
+        }
+        let word = &input[start..cursor];
+        let len = word.len().min(out[count].len());
+        out[count][..len].copy_from_slice(&word[..len]);
+        lens[count] = len;
+        count += 1;
+    }
+    count
+}
+
+fn native_write_file(
+    path_ptr: *const u8,
+    path_len: usize,
+    data_ptr: *const u8,
+    data_len: usize,
+) -> bool {
+    let mut path = [0u8; 256];
+    let Some(path) = native_path(path_ptr, path_len, &mut path) else {
+        return false;
+    };
+    if data_len > 4096 {
+        return false;
+    }
+    let mut data = [0u8; 4096];
+    if !copy_current_user_bytes(data_ptr, data_len, &mut data) {
+        return false;
+    }
+    let Some(index) = crate::nkfs::open_writable_file(path, true) else {
+        return false;
+    };
+    crate::nkfs::write_ram_file(index, 0, &data[..data_len]) == Some(data_len)
 }
 
 fn native_exec(path_ptr: *const u8, path_len: usize, frame: &mut scheduler::TrapFrame) -> bool {

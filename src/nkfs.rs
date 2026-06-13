@@ -7,6 +7,8 @@ const VERSION: u32 = 1;
 const INODE_SIZE: usize = 128;
 const MAX_FILE_SIZE: usize = 20 * 1024 * 1024;
 const SMALL_FILE_CACHE_SIZE: usize = 512 * 1024;
+const RAM_FILE_CAP: usize = 256 * 1024;
+const RAM_FILE_COUNT: usize = 32;
 
 const KIND_FILE: u16 = 1;
 const KIND_DIR: u16 = 2;
@@ -20,6 +22,35 @@ static mut SMALL_FILE_CACHE_INODE: u32 = 0;
 static mut SMALL_FILE_CACHE_LEN: usize = 0;
 static mut DIR_BUFFER: [u8; block::SECTOR_SIZE * 16] = [0; block::SECTOR_SIZE * 16];
 static mut EXTENT_BUFFER: [u8; block::SECTOR_SIZE * 128] = [0; block::SECTOR_SIZE * 128];
+
+struct RamFileCell(core::cell::UnsafeCell<[RamFile; RAM_FILE_COUNT]>);
+
+unsafe impl Sync for RamFileCell {}
+
+#[derive(Clone, Copy)]
+struct RamFile {
+    used: bool,
+    path: [u8; 256],
+    path_len: usize,
+    data: [u8; RAM_FILE_CAP],
+    len: usize,
+}
+
+impl RamFile {
+    const fn empty() -> Self {
+        Self {
+            used: false,
+            path: [0; 256],
+            path_len: 0,
+            data: [0; RAM_FILE_CAP],
+            len: 0,
+        }
+    }
+}
+
+static RAM_FILES: RamFileCell = RamFileCell(core::cell::UnsafeCell::new(
+    [RamFile::empty(); RAM_FILE_COUNT],
+));
 
 #[derive(Clone, Copy)]
 struct Superblock {
@@ -52,6 +83,10 @@ pub fn smoke_test() {
 }
 
 pub fn read_file(path: &[u8]) -> Option<&'static [u8]> {
+    if let Some(index) = ram_find(path) {
+        return ram_file_slice(index);
+    }
+
     let fs = mount()?;
     let inode = resolve_path(fs, path)?;
     if inode.kind != KIND_FILE || inode.size > MAX_FILE_SIZE {
@@ -167,15 +202,24 @@ pub fn read_dir(path: &[u8]) -> Option<&'static [u8]> {
         ptr::addr_of_mut!(DIR_BUFFER).cast(),
         block::SECTOR_SIZE * 16,
     )?;
+    let size = append_ram_dir_entries(path, inode.size).unwrap_or(inode.size);
     unsafe {
         Some(core::slice::from_raw_parts(
             ptr::addr_of!(DIR_BUFFER).cast(),
-            inode.size,
+            size,
         ))
     }
 }
 
 pub fn metadata(path: &[u8]) -> Option<Metadata> {
+    if let Some(index) = ram_find(path) {
+        let len = unsafe { (*RAM_FILES.0.get())[index].len };
+        return Some(Metadata {
+            kind: KIND_FILE,
+            size: len,
+        });
+    }
+
     let fs = mount()?;
     let inode = resolve_path(fs, path)?;
     Some(Metadata {
@@ -186,6 +230,99 @@ pub fn metadata(path: &[u8]) -> Option<Metadata> {
 
 pub fn exists(path: &[u8]) -> bool {
     metadata(path).is_some()
+}
+
+pub fn open_writable_file(path: &[u8], truncate: bool) -> Option<usize> {
+    if !valid_absolute_file_path(path) {
+        return None;
+    }
+    if let Some(index) = ram_find(path) {
+        if truncate {
+            unsafe {
+                (*RAM_FILES.0.get())[index].len = 0;
+            }
+        }
+        return Some(index);
+    }
+    if !parent_directory_exists(path) {
+        return None;
+    }
+
+    unsafe {
+        let files = &mut *RAM_FILES.0.get();
+        for index in 0..RAM_FILE_COUNT {
+            if !files[index].used {
+                files[index].used = true;
+                files[index].path[..path.len()].copy_from_slice(path);
+                files[index].path_len = path.len();
+                files[index].len = 0;
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+pub fn ram_file_slice(index: usize) -> Option<&'static [u8]> {
+    if index >= RAM_FILE_COUNT {
+        return None;
+    }
+    unsafe {
+        let file = &(*RAM_FILES.0.get())[index];
+        if !file.used {
+            return None;
+        }
+        Some(core::slice::from_raw_parts(file.data.as_ptr(), file.len))
+    }
+}
+
+pub fn write_ram_file(index: usize, offset: usize, bytes: &[u8]) -> Option<usize> {
+    if index >= RAM_FILE_COUNT {
+        return None;
+    }
+    unsafe {
+        let file = &mut (*RAM_FILES.0.get())[index];
+        if !file.used || offset > RAM_FILE_CAP {
+            return None;
+        }
+        let count = bytes.len().min(RAM_FILE_CAP - offset);
+        file.data[offset..offset + count].copy_from_slice(&bytes[..count]);
+        file.len = file.len.max(offset + count);
+        Some(count)
+    }
+}
+
+pub fn truncate_ram_file(index: usize, len: usize) -> bool {
+    if index >= RAM_FILE_COUNT || len > RAM_FILE_CAP {
+        return false;
+    }
+    unsafe {
+        let file = &mut (*RAM_FILES.0.get())[index];
+        if !file.used {
+            return false;
+        }
+        if len > file.len {
+            for byte in &mut file.data[file.len..len] {
+                *byte = 0;
+            }
+        }
+        file.len = len;
+        true
+    }
+}
+
+pub fn ram_file_index(path: &[u8]) -> Option<usize> {
+    ram_find(path)
+}
+
+pub fn remove_ram_file(path: &[u8]) -> bool {
+    let Some(index) = ram_find(path) else {
+        return false;
+    };
+    unsafe {
+        (*RAM_FILES.0.get())[index] = RamFile::empty();
+    }
+    true
 }
 
 fn mount() -> Option<Superblock> {
@@ -219,6 +356,128 @@ fn mount() -> Option<Superblock> {
         MOUNT_CACHE = Some(fs);
     }
     Some(fs)
+}
+
+fn ram_find(path: &[u8]) -> Option<usize> {
+    let path = normalized_path_bytes(path)?;
+    unsafe {
+        let files = &*RAM_FILES.0.get();
+        for index in 0..RAM_FILE_COUNT {
+            let file = &files[index];
+            if file.used && file.path_len == path.len() && &file.path[..file.path_len] == path {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+fn normalized_path_bytes(path: &[u8]) -> Option<&[u8]> {
+    if path.is_empty() || path[0] != b'/' || path.len() > 256 {
+        return None;
+    }
+    let mut len = path.len();
+    while len > 1 && path[len - 1] == b'/' {
+        len -= 1;
+    }
+    Some(&path[..len])
+}
+
+fn valid_absolute_file_path(path: &[u8]) -> bool {
+    let Some(path) = normalized_path_bytes(path) else {
+        return false;
+    };
+    path.len() > 1 && !path[path.len() - 1..].contains(&b'/')
+}
+
+fn parent_directory_exists(path: &[u8]) -> bool {
+    let Some(path) = normalized_path_bytes(path) else {
+        return false;
+    };
+    let mut slash = 0usize;
+    for index in 1..path.len() {
+        if path[index] == b'/' {
+            slash = index;
+        }
+    }
+    let parent = if slash == 0 { b"/" } else { &path[..slash] };
+    let Some(fs) = mount() else {
+        return false;
+    };
+    resolve_path(fs, parent)
+        .map(|inode| inode.kind == KIND_DIR)
+        .unwrap_or(false)
+}
+
+fn append_ram_dir_entries(path: &[u8], start: usize) -> Option<usize> {
+    let dir = normalized_path_bytes(path)?;
+    let mut offset = start;
+    unsafe {
+        let files = &*RAM_FILES.0.get();
+        for file in files.iter() {
+            if !file.used {
+                continue;
+            }
+            let Some(name) = ram_child_name(dir, &file.path[..file.path_len]) else {
+                continue;
+            };
+            if find_dir_name_in_buffer(start, name) {
+                continue;
+            }
+            let record_len = align_up(8 + name.len(), 4);
+            if offset + record_len > block::SECTOR_SIZE * 16 {
+                return Some(offset);
+            }
+            let buffer = &mut *ptr::addr_of_mut!(DIR_BUFFER);
+            write_u32(buffer, offset, 0x8000_0000 | file.path_len as u32);
+            write_u16(buffer, offset + 4, name.len() as u16);
+            write_u16(buffer, offset + 6, KIND_FILE);
+            buffer[offset + 8..offset + 8 + name.len()].copy_from_slice(name);
+            for index in offset + 8 + name.len()..offset + record_len {
+                buffer[index] = 0;
+            }
+            offset += record_len;
+        }
+    }
+    Some(offset)
+}
+
+fn ram_child_name<'a>(dir: &[u8], file_path: &'a [u8]) -> Option<&'a [u8]> {
+    if dir == b"/" {
+        let rest = file_path.get(1..)?;
+        if rest.is_empty() || rest.contains(&b'/') {
+            return None;
+        }
+        return Some(rest);
+    }
+    if file_path.len() <= dir.len() + 1
+        || &file_path[..dir.len()] != dir
+        || file_path[dir.len()] != b'/'
+    {
+        return None;
+    }
+    let rest = &file_path[dir.len() + 1..];
+    if rest.is_empty() || rest.contains(&b'/') {
+        return None;
+    }
+    Some(rest)
+}
+
+unsafe fn find_dir_name_in_buffer(size: usize, name: &[u8]) -> bool {
+    let buffer = &*ptr::addr_of!(DIR_BUFFER);
+    let mut offset = 0usize;
+    while offset + 8 <= size {
+        let name_len = read_u16(buffer, offset + 4).unwrap_or(0) as usize;
+        let next = align_up(offset + 8 + name_len, 4);
+        if next > size {
+            break;
+        }
+        if buffer.get(offset + 8..offset + 8 + name_len) == Some(name) {
+            return true;
+        }
+        offset = next;
+    }
+    false
 }
 
 fn resolve_path(fs: Superblock, path: &[u8]) -> Option<Inode> {
@@ -356,4 +615,18 @@ fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes([
         data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]))
+}
+
+fn write_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    let raw = value.to_le_bytes();
+    bytes[offset] = raw[0];
+    bytes[offset + 1] = raw[1];
+}
+
+fn write_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    let raw = value.to_le_bytes();
+    bytes[offset] = raw[0];
+    bytes[offset + 1] = raw[1];
+    bytes[offset + 2] = raw[2];
+    bytes[offset + 3] = raw[3];
 }

@@ -205,12 +205,17 @@ ensure_bash_program() {
   cp "$bash_bin" "$BUILD/user/bash.elf"
 }
 
+ensure_nasm_program() {
+  "$ROOT/ports/nasm/build-nasm.sh"
+}
+
 build_user_program gui
 build_user_program taskview
 build_user_program init
 build_user_program nsh
 ensure_coreutils
 ensure_bash_program
+ensure_nasm_program
 
 app_files=(
   "$BUILD/user/gui.elf=/bin/gui"
@@ -220,6 +225,7 @@ app_files=(
   "$BUILD/user/init.elf=/bin/init"
   "$BUILD/user/nsh.elf=/bin/nsh"
   "$BUILD/user/bash.elf=/bin/bash"
+  "$BUILD/user/nasm.elf=/bin/nasm"
 )
 while read -r app alias; do
   if [ -z "${app:-}" ] || [[ "$app" = \#* ]]; then
@@ -230,6 +236,8 @@ done < "$ROOT/ports/coreutils/coreutils-apps.txt"
 app_files+=("$ROOT/apps/HELLO.TXT=/hello.txt")
 app_files+=("$ROOT/apps/HELLO.TXT=/HELLO.TXT")
 app_files+=("$ROOT/apps/font.psf=/etc/font.psf")
+app_files+=("$ROOT/apps/hello.asm=/home/root/hello.asm")
+app_files+=("$ROOT/apps/hello.asm=/hello.asm")
 python3 "$ROOT/scripts/mkfs-nkfs.py" "$BUILD/nk-root.nkfs" "${app_files[@]}"
 
 cp "$ROOT/target/x86_64-unknown-none/release/nk" "$ISO_ROOT/boot/nk"

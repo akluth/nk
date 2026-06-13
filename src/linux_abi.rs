@@ -17,14 +17,21 @@ const SYS_LSEEK: u64 = 8;
 const SYS_RT_SIGACTION: u64 = 13;
 const SYS_RT_SIGPROCMASK: u64 = 14;
 const SYS_IOCTL: u64 = 16;
+const SYS_PWRITE64: u64 = 18;
 const SYS_WRITEV: u64 = 20;
 const SYS_PIPE: u64 = 22;
 const SYS_ACCESS: u64 = 21;
 const SYS_MADVISE: u64 = 28;
+const SYS_FSYNC: u64 = 74;
+const SYS_FDATASYNC: u64 = 75;
+const SYS_TRUNCATE: u64 = 76;
+const SYS_FTRUNCATE: u64 = 77;
 const SYS_FCNTL: u64 = 72;
 const SYS_GETCWD: u64 = 79;
 const SYS_CHDIR: u64 = 80;
+const SYS_UNLINK: u64 = 87;
 const SYS_GETTIMEOFDAY: u64 = 96;
+const SYS_GETRLIMIT: u64 = 97;
 const SYS_GETRESUID: u64 = 118;
 const SYS_GETRESGID: u64 = 120;
 const SYS_SIGALTSTACK: u64 = 131;
@@ -79,6 +86,11 @@ const EAGAIN: i64 = -11;
 const EMFILE: i64 = -24;
 const ENODATA: i64 = -61;
 
+const O_WRONLY: u64 = 1;
+const O_RDWR: u64 = 2;
+const O_CREAT: u64 = 0o100;
+const O_TRUNC: u64 = 0o1000;
+
 const USER_BRK_START: u64 = 0x0000_0000_4100_0000;
 const USER_BRK_END: u64 = 0x0000_0000_4140_0000;
 const USER_MMAP_START: u64 = 0x0000_0000_4140_0000;
@@ -89,6 +101,8 @@ struct OpenFile {
     data: Option<&'static [u8]>,
     offset: usize,
     is_dir: bool,
+    writable: bool,
+    ram_index: usize,
     mode: u32,
     path: [u8; 256],
     path_len: usize,
@@ -100,6 +114,8 @@ impl OpenFile {
             data: None,
             offset: 0,
             is_dir: false,
+            writable: false,
+            ram_index: usize::MAX,
             mode: 0,
             path: [0; 256],
             path_len: 0,
@@ -183,7 +199,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_OPEN => {
-            frame.rax = open_at(-100, frame.rdi as *const u8) as u64;
+            frame.rax = open_at(-100, frame.rdi as *const u8, frame.rsi) as u64;
             true
         }
         SYS_CLOSE => {
@@ -207,7 +223,8 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_MMAP => {
-            frame.rax = mmap(frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8 as i64) as u64;
+            frame.rax =
+                mmap(frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8 as i64, frame.r9) as u64;
             true
         }
         SYS_MUNMAP => {
@@ -230,6 +247,15 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = ioctl(frame.rdi as i32, frame.rsi, frame.rdx as *mut u8) as u64;
             true
         }
+        SYS_PWRITE64 => {
+            frame.rax = pwrite64(
+                frame.rdi as i32,
+                frame.rsi as *const u8,
+                frame.rdx as usize,
+                frame.r10 as usize,
+            ) as u64;
+            true
+        }
         SYS_WRITEV => {
             frame.rax = writev(frame.rdi as i32, frame.rsi as *const u8, frame.rdx as usize) as u64;
             true
@@ -248,6 +274,18 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
         }
         SYS_FCNTL => {
             frame.rax = fcntl(frame.rdi as i32, frame.rsi, frame.rdx) as u64;
+            true
+        }
+        SYS_FSYNC | SYS_FDATASYNC => {
+            frame.rax = 0;
+            true
+        }
+        SYS_TRUNCATE => {
+            frame.rax = truncate_path(frame.rdi as *const u8, frame.rsi as usize) as u64;
+            true
+        }
+        SYS_FTRUNCATE => {
+            frame.rax = ftruncate_fd(frame.rdi as i32, frame.rsi as usize) as u64;
             true
         }
         SYS_BRK => {
@@ -292,6 +330,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = gettimeofday(frame.rdi as *mut u8) as u64;
             true
         }
+        SYS_GETRLIMIT => {
+            frame.rax = getrlimit(frame.rsi as *mut u8) as u64;
+            true
+        }
         SYS_GETRESUID | SYS_GETRESGID => {
             frame.rax = write_three_ids(
                 frame.rdi as *mut u32,
@@ -306,6 +348,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
         }
         SYS_CHDIR => {
             frame.rax = chdir(frame.rdi as *const u8) as u64;
+            true
+        }
+        SYS_UNLINK => {
+            frame.rax = unlink(frame.rdi as *const u8) as u64;
             true
         }
         SYS_READLINK => {
@@ -374,7 +420,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_OPENAT => {
-            frame.rax = open_at(frame.rdi as i32, frame.rsi as *const u8) as u64;
+            frame.rax = open_at(frame.rdi as i32, frame.rsi as *const u8, frame.rdx) as u64;
             true
         }
         SYS_NEWFSTATAT => {
@@ -386,7 +432,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_PRLIMIT64 => {
-            frame.rax = 0;
+            frame.rax = prlimit64(frame.rdx as *const u8, frame.r10 as *mut u8) as u64;
             true
         }
         SYS_GETRANDOM => {
@@ -413,7 +459,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
     }
 }
 
-fn open_at(dirfd: i32, path: *const u8) -> i64 {
+fn open_at(dirfd: i32, path: *const u8, flags: u64) -> i64 {
     let mut raw_path = [0u8; 256];
     let raw_len = read_user_cstr(path, &mut raw_path);
     if raw_len == 0 {
@@ -422,24 +468,30 @@ fn open_at(dirfd: i32, path: *const u8) -> i64 {
 
     let mut resolved = [0u8; 256];
     let Some(path_len) = resolve_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
-        return ENOENT;
+        if flags & O_CREAT == 0 {
+            return ENOENT;
+        }
+        let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false)
+        else {
+            return ENOENT;
+        };
+        return open_ram_file(&resolved[..path_len], flags, true);
     };
+
+    let write_requested = flags & (O_WRONLY | O_RDWR | O_TRUNC) != 0;
+    if write_requested {
+        return open_ram_file(&resolved[..path_len], flags, true);
+    }
 
     let Some(meta) = nkfs::metadata(&resolved[..path_len]) else {
         return ENOENT;
     };
-    let data = if meta.kind == 2 {
-        nkfs::read_dir(&resolved[..path_len])
-    } else {
-        nkfs::read_file(&resolved[..path_len])
-    };
-    let Some(data) = data else {
+    let Some(data) = read_visible_file_or_dir(&resolved[..path_len], meta.kind) else {
         return ENOENT;
     };
     if data.len() > FD_BUFFER_CAP {
         return EINVAL;
     }
-
     unsafe {
         let task_index = current_task_index();
         let Some((fd, file_index)) = alloc_open_file() else {
@@ -461,10 +513,65 @@ fn open_at(dirfd: i32, path: *const u8) -> i64 {
         ));
         file.offset = 0;
         file.is_dir = meta.kind == 2;
+        file.writable = false;
+        file.ram_index = nkfs::ram_file_index(&resolved[..path_len]).unwrap_or(usize::MAX);
         file.mode = if meta.kind == 2 { 0o040555 } else { 0o100555 };
         file.path[..path_len].copy_from_slice(&resolved[..path_len]);
         file.path_len = path_len;
         fd as i64
+    }
+}
+
+fn open_ram_file(path: &[u8], flags: u64, create_or_truncate: bool) -> i64 {
+    let ram_index = if create_or_truncate {
+        nkfs::open_writable_file(path, flags & O_TRUNC != 0)
+    } else {
+        nkfs::ram_file_index(path)
+    };
+    let Some(ram_index) = ram_index else {
+        return ENOENT;
+    };
+    let Some(data) = nkfs::ram_file_slice(ram_index) else {
+        return ENOENT;
+    };
+    unsafe {
+        let task_index = current_task_index();
+        let Some((fd, file_index)) = alloc_open_file() else {
+            return EMFILE;
+        };
+        if data.len() > FD_BUFFER_CAP {
+            return EINVAL;
+        }
+        core::ptr::copy_nonoverlapping(
+            data.as_ptr(),
+            core::ptr::addr_of_mut!(FD_BUFFERS)
+                .cast::<u8>()
+                .add((task_index * MAX_OPEN_FILES + file_index) * FD_BUFFER_CAP),
+            data.len(),
+        );
+        let file = &mut (*OPEN_FILES.0.get())[task_index][file_index];
+        file.data = Some(core::slice::from_raw_parts(
+            core::ptr::addr_of!(FD_BUFFERS)
+                .cast::<u8>()
+                .add((task_index * MAX_OPEN_FILES + file_index) * FD_BUFFER_CAP),
+            data.len(),
+        ));
+        file.offset = 0;
+        file.is_dir = false;
+        file.writable = flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC) != 0;
+        file.ram_index = ram_index;
+        file.mode = 0o100755;
+        file.path[..path.len()].copy_from_slice(path);
+        file.path_len = path.len();
+        fd as i64
+    }
+}
+
+fn read_visible_file_or_dir(path: &[u8], kind: u16) -> Option<&'static [u8]> {
+    if kind == 2 {
+        nkfs::read_dir(path)
+    } else {
+        nkfs::read_file(path)
     }
 }
 
@@ -703,11 +810,14 @@ unsafe fn wake_stdin_reader() {
 }
 
 fn write(fd: i32, buffer: *const u8, len: usize) -> i64 {
+    if len == 0 {
+        return 0;
+    }
     if buffer.is_null() {
         return EFAULT;
     }
     if fd != 1 && fd != 2 {
-        return EBADF;
+        return write_regular_file(fd, buffer, len);
     }
 
     let len = unsafe {
@@ -739,6 +849,62 @@ fn write(fd: i32, buffer: *const u8, len: usize) -> i64 {
         written += count;
     }
     len as i64
+}
+
+fn write_regular_file(fd: i32, buffer: *const u8, len: usize) -> i64 {
+    if fd < FIRST_USER_FD {
+        return EBADF;
+    }
+    unsafe {
+        let Some(file) = open_file(fd) else {
+            return EBADF;
+        };
+        if !file.writable || file.is_dir || file.ram_index == usize::MAX {
+            return EBADF;
+        }
+        let mut written = 0usize;
+        while written < len {
+            let count = (len - written).min(4096);
+            let chunk = buffer.add(written);
+            if !user_buffer_readable(chunk as u64, count) {
+                return if written > 0 { written as i64 } else { EFAULT };
+            }
+            let bytes = core::slice::from_raw_parts(chunk, count);
+            let Some(done) = nkfs::write_ram_file(file.ram_index, file.offset, bytes) else {
+                return if written > 0 { written as i64 } else { EINVAL };
+            };
+            file.offset += done;
+            written += done;
+            if done < count {
+                break;
+            }
+        }
+        if let Some(data) = nkfs::ram_file_slice(file.ram_index) {
+            file.data = Some(data);
+        }
+        written as i64
+    }
+}
+
+fn pwrite64(fd: i32, buffer: *const u8, len: usize, offset: usize) -> i64 {
+    if fd < FIRST_USER_FD {
+        return EBADF;
+    }
+    unsafe {
+        let Some(file) = open_file(fd) else {
+            return EBADF;
+        };
+        if !file.writable || file.is_dir || file.ram_index == usize::MAX {
+            return EBADF;
+        }
+        let old_offset = file.offset;
+        file.offset = offset;
+        let written = write_regular_file(fd, buffer, len);
+        if let Some(file) = open_file(fd) {
+            file.offset = old_offset;
+        }
+        written
+    }
 }
 
 fn writev(fd: i32, iov: *const u8, count: usize) -> i64 {
@@ -791,22 +957,65 @@ fn lseek(fd: i32, offset: i64, whence: i32) -> i64 {
         let Some(file) = open_file(fd) else {
             return EBADF;
         };
-        let Some(data) = file.data else {
-            return EBADF;
+        let len = if file.ram_index != usize::MAX {
+            nkfs::ram_file_slice(file.ram_index).map_or(0, |data| data.len())
+        } else {
+            file.data.map_or(0, |data| data.len())
         };
         let base = match whence {
             0 => 0i64,
             1 => file.offset as i64,
-            2 => data.len() as i64,
+            2 => len as i64,
             _ => return EINVAL,
         };
         let next = base.saturating_add(offset);
         if next < 0 {
             return EINVAL;
         }
-        file.offset = (next as usize).min(data.len());
+        file.offset = next as usize;
         file.offset as i64
     }
+}
+
+fn truncate_path(path: *const u8, len: usize) -> i64 {
+    let mut raw_path = [0u8; 256];
+    let raw_len = read_user_cstr(path, &mut raw_path);
+    if raw_len == 0 {
+        return ENOENT;
+    }
+    let mut resolved = [0u8; 256];
+    let Some(path_len) = resolve_at_path(-100, &raw_path[..raw_len], &mut resolved, false) else {
+        return ENOENT;
+    };
+    let Some(index) = nkfs::open_writable_file(&resolved[..path_len], false) else {
+        return EINVAL;
+    };
+    if nkfs::truncate_ram_file(index, len) {
+        0
+    } else {
+        EINVAL
+    }
+}
+
+fn ftruncate_fd(fd: i32, len: usize) -> i64 {
+    if fd < FIRST_USER_FD {
+        return EBADF;
+    }
+    unsafe {
+        let Some(file) = open_file(fd) else {
+            return EBADF;
+        };
+        if !file.writable || file.is_dir || file.ram_index == usize::MAX {
+            return EBADF;
+        }
+        if !nkfs::truncate_ram_file(file.ram_index, len) {
+            return EINVAL;
+        }
+        if let Some(data) = nkfs::ram_file_slice(file.ram_index) {
+            file.data = Some(data);
+        }
+    }
+    0
 }
 
 fn fcntl(fd: i32, command: u64, _arg: u64) -> i64 {
@@ -846,17 +1055,13 @@ fn brk(request: u64) -> i64 {
     }
 }
 
-fn mmap(address: u64, len: u64, _prot: u64, flags: u64, fd: i64) -> i64 {
+fn mmap(address: u64, len: u64, _prot: u64, flags: u64, fd: i64, offset: u64) -> i64 {
     const MAP_FIXED: u64 = 0x10;
     const MAP_ANONYMOUS: u64 = 0x20;
 
     if len == 0 {
         return EINVAL;
     }
-    if fd != -1 && flags & MAP_ANONYMOUS == 0 {
-        return EINVAL;
-    }
-
     let aligned_len = (len + 4095) & !4095;
     unsafe {
         let task_index = current_task_index();
@@ -872,6 +1077,24 @@ fn mmap(address: u64, len: u64, _prot: u64, flags: u64, fd: i64) -> i64 {
         }
         if !memory::allocate_user_range(task_index, base, aligned_len as usize, true) {
             return -12;
+        }
+        if fd != -1 && flags & MAP_ANONYMOUS == 0 {
+            let Some(file) = open_file(fd as i32) else {
+                return EBADF;
+            };
+            let Some(data) = file.data else {
+                return EBADF;
+            };
+            let start = offset as usize;
+            if start > data.len() {
+                return EINVAL;
+            }
+            let count = (len as usize).min(data.len() - start);
+            if count > 0
+                && !memory::copy_user_segment(task_index, base, &data[start..start + count], count)
+            {
+                return -12;
+            }
         }
         base as i64
     }
@@ -1312,6 +1535,31 @@ fn clock_gettime(buffer: *mut u8) -> i64 {
     0
 }
 
+fn getrlimit(buffer: *mut u8) -> i64 {
+    write_rlimit(buffer)
+}
+
+fn prlimit64(new_limit: *const u8, old_limit: *mut u8) -> i64 {
+    if !new_limit.is_null() {
+        return EINVAL;
+    }
+    if old_limit.is_null() {
+        return 0;
+    }
+    write_rlimit(old_limit)
+}
+
+fn write_rlimit(buffer: *mut u8) -> i64 {
+    if buffer.is_null() {
+        return EFAULT;
+    }
+    unsafe {
+        write_user_u64(buffer, u64::MAX);
+        write_user_u64(buffer.add(8), u64::MAX);
+    }
+    0
+}
+
 fn write_three_ids(first: *mut u32, second: *mut u32, third: *mut u32) -> i64 {
     unsafe {
         if !first.is_null() {
@@ -1362,6 +1610,23 @@ fn chdir(path: *const u8) -> i64 {
     }
 
     set_current_cwd(&resolved[..path_len])
+}
+
+fn unlink(path: *const u8) -> i64 {
+    let mut raw_path = [0u8; 256];
+    let raw_len = read_user_cstr(path, &mut raw_path);
+    if raw_len == 0 {
+        return ENOENT;
+    }
+    let mut resolved = [0u8; 256];
+    let Some(path_len) = normalize_at_path(-100, &raw_path[..raw_len], &mut resolved, false) else {
+        return ENOENT;
+    };
+    if nkfs::remove_ram_file(&resolved[..path_len]) {
+        0
+    } else {
+        ENOENT
+    }
 }
 
 fn getrandom(buffer: *mut u8, len: usize) -> i64 {
