@@ -29,6 +29,7 @@ const CTRL_S: u8 = 19;
 const CTRL_X: u8 = 24;
 const BACKSPACE: u8 = 8;
 const DELETE: u8 = 127;
+const ESC: u8 = 0x1b;
 
 const BUFFER_CAP: usize = 32 * 1024;
 const PATH_CAP: usize = 256;
@@ -82,8 +83,8 @@ fn main(stack: *const u64) -> i32 {
     loop {
         let key = read_key();
         match key {
-            CTRL_S => editor.save(),
-            CTRL_X => {
+            Key::Byte(CTRL_S) => editor.save(),
+            Key::Byte(CTRL_X) => {
                 if editor.dirty && !editor.quit_armed {
                     editor.status = b"Unsaved changes. ^S saves, ^X again quits";
                     editor.quit_armed = true;
@@ -94,9 +95,16 @@ fn main(stack: *const u64) -> i32 {
                     return 0;
                 }
             }
-            BACKSPACE | DELETE => editor.backspace(),
-            b'\r' | b'\n' => editor.insert(b'\n'),
-            byte if byte >= 0x20 => editor.insert(byte),
+            Key::Byte(BACKSPACE) => editor.backspace(),
+            Key::Byte(DELETE) => editor.delete(),
+            Key::Byte(b'\r') | Key::Byte(b'\n') => editor.insert(b'\n'),
+            Key::Byte(byte) if byte >= 0x20 => editor.insert(byte),
+            Key::Left => editor.move_left(),
+            Key::Right => editor.move_right(),
+            Key::Up => editor.move_up(),
+            Key::Down => editor.move_down(),
+            Key::Home => editor.move_home(),
+            Key::End => editor.move_end(),
             _ => {}
         }
         editor.render();
@@ -166,7 +174,7 @@ impl Editor {
         }
 
         move_cursor(SCREEN_ROWS - 1, 1);
-        write_all(STDOUT, b"^S Speichern    ^X Beenden    Backspace Loeschen    Enter Neue Zeile");
+        write_all(STDOUT, b"^S Speichern  ^X Beenden  Pfeile Cursor  Backspace/Entf Loeschen");
         write_all(STDOUT, b"\x1b[K");
 
         move_cursor(SCREEN_ROWS, 1);
@@ -205,19 +213,70 @@ impl Editor {
         if self.cursor == 0 {
             return;
         }
+        self.cursor -= 1;
+        self.delete_at_cursor();
+    }
+
+    fn delete(&mut self) {
+        if self.cursor >= self.len {
+            return;
+        }
+        self.delete_at_cursor();
+    }
+
+    fn delete_at_cursor(&mut self) {
         unsafe {
             let buffer = ptr::addr_of_mut!(BUFFER).cast::<u8>();
-            let mut index = self.cursor - 1;
+            let mut index = self.cursor;
             while index + 1 < self.len {
                 *buffer.add(index) = *buffer.add(index + 1);
                 index += 1;
             }
         }
-        self.cursor -= 1;
         self.len -= 1;
         self.dirty = true;
         self.quit_armed = false;
         self.status = b"Modified";
+    }
+
+    fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+        self.status = b"";
+    }
+
+    fn move_right(&mut self) {
+        if self.cursor < self.len {
+            self.cursor += 1;
+        }
+        self.status = b"";
+    }
+
+    fn move_up(&mut self) {
+        let (line, col) = self.cursor_line_col();
+        if line > 0 {
+            self.cursor = self.offset_for_line_col(line - 1, col);
+        }
+        self.status = b"";
+    }
+
+    fn move_down(&mut self) {
+        let (line, col) = self.cursor_line_col();
+        self.cursor = self.offset_for_line_col(line + 1, col);
+        self.status = b"";
+    }
+
+    fn move_home(&mut self) {
+        let (line, _) = self.cursor_line_col();
+        self.cursor = self.offset_for_line_col(line, 0);
+        self.status = b"";
+    }
+
+    fn move_end(&mut self) {
+        let (line, _) = self.cursor_line_col();
+        if let Some((_, end)) = self.line_bounds(line) {
+            self.cursor = end;
+        }
+        self.status = b"";
     }
 
     fn save(&mut self) {
@@ -287,6 +346,14 @@ impl Editor {
             }
         }
         (line, col)
+    }
+
+    fn offset_for_line_col(&self, line: usize, col: usize) -> usize {
+        if let Some((start, end)) = self.line_bounds(line) {
+            start + col.min(end.saturating_sub(start))
+        } else {
+            self.len
+        }
     }
 
     fn keep_cursor_visible(&mut self) {
@@ -397,7 +464,36 @@ fn cstr(ptr: *const u8) -> Option<&'static [u8]> {
     }
 }
 
-fn read_key() -> u8 {
+enum Key {
+    Byte(u8),
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+}
+
+fn read_key() -> Key {
+    let byte = read_byte();
+    if byte != ESC {
+        return Key::Byte(byte);
+    }
+    if read_byte() != b'[' {
+        return Key::Byte(ESC);
+    }
+    match read_byte() {
+        b'A' => Key::Up,
+        b'B' => Key::Down,
+        b'C' => Key::Right,
+        b'D' => Key::Left,
+        b'F' => Key::End,
+        b'H' => Key::Home,
+        other => Key::Byte(other),
+    }
+}
+
+fn read_byte() -> u8 {
     let mut byte = [0u8; 1];
     loop {
         let read = sys_read(STDIN, byte.as_mut_ptr(), 1) as i64;

@@ -222,7 +222,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_POLL => {
-            frame.rax = 0;
+            frame.rax = poll(frame.rdi as *mut u8, frame.rsi as usize) as u64;
             true
         }
         SYS_MMAP => {
@@ -1420,6 +1420,38 @@ fn ioctl(fd: i32, request: u64, argp: *mut u8) -> i64 {
     }
 }
 
+fn poll(fds: *mut u8, count: usize) -> i64 {
+    if fds.is_null() {
+        return EFAULT;
+    }
+    if count == 0 {
+        return 0;
+    }
+    let mut ready = 0i64;
+    unsafe {
+        for index in 0..count.min(16) {
+            let base = fds.add(index * 8);
+            let fd = read_user_i32(base);
+            let events = read_user_i16(base.add(4));
+            let mut revents = 0i16;
+            if fd == 0 && events & 1 != 0 {
+                if READY_READ != READY_WRITE || keyboard::has_key() {
+                    revents |= 1;
+                }
+            } else if (fd == 1 || fd == 2) && events & 4 != 0 {
+                revents |= 4;
+            } else if fd >= FIRST_USER_FD && events != 0 && open_file(fd).is_some() {
+                revents |= events & 5;
+            }
+            if revents != 0 {
+                ready += 1;
+            }
+            write_user_u16(base.add(6), revents as u16);
+        }
+    }
+    ready
+}
+
 fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
     if fd < FIRST_USER_FD {
         return EBADF;
@@ -1953,6 +1985,18 @@ unsafe fn read_user_u32(ptr: *const u8) -> u32 {
         *byte = *ptr.add(index);
     }
     u32::from_le_bytes(bytes)
+}
+
+unsafe fn read_user_i32(ptr: *const u8) -> i32 {
+    read_user_u32(ptr) as i32
+}
+
+unsafe fn read_user_i16(ptr: *const u8) -> i16 {
+    let mut bytes = [0u8; 2];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = *ptr.add(index);
+    }
+    i16::from_le_bytes(bytes)
 }
 
 unsafe fn write_user_u16(ptr: *mut u8, value: u16) {

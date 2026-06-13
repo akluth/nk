@@ -8,6 +8,7 @@ struct KeyboardBuffer {
     write: usize,
     shift: bool,
     ctrl: bool,
+    extended: bool,
 }
 
 impl KeyboardBuffer {
@@ -18,6 +19,7 @@ impl KeyboardBuffer {
             write: 0,
             shift: false,
             ctrl: false,
+            extended: false,
         }
     }
 
@@ -31,6 +33,10 @@ impl KeyboardBuffer {
         Some(byte)
     }
 
+    fn has_key(&self) -> bool {
+        self.read != self.write
+    }
+
     fn push(&mut self, byte: u8) {
         let next = (self.write + 1) % BUFFER_LEN;
         if next == self.read {
@@ -38,6 +44,12 @@ impl KeyboardBuffer {
         }
         self.bytes[self.write] = byte;
         self.write = next;
+    }
+
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.push(*byte);
+        }
     }
 }
 
@@ -51,6 +63,10 @@ pub fn decode_scancode(scancode: u8) -> Option<u8> {
     unsafe {
         let keyboard = &mut *KEYBOARD.0.get();
         match scancode {
+            0xe0 => {
+                keyboard.extended = true;
+                return None;
+            }
             0x2a | 0x36 => {
                 keyboard.shift = true;
                 return None;
@@ -67,8 +83,25 @@ pub fn decode_scancode(scancode: u8) -> Option<u8> {
                 keyboard.ctrl = false;
                 return None;
             }
-            code if code & 0x80 != 0 => return None,
+            code if code & 0x80 != 0 => {
+                keyboard.extended = false;
+                return None;
+            }
             code => {
+                if keyboard.extended {
+                    keyboard.extended = false;
+                    match code {
+                        0x47 => keyboard.push_bytes(b"\x1b[H"),
+                        0x48 => keyboard.push_bytes(b"\x1b[A"),
+                        0x4b => keyboard.push_bytes(b"\x1b[D"),
+                        0x4d => keyboard.push_bytes(b"\x1b[C"),
+                        0x4f => keyboard.push_bytes(b"\x1b[F"),
+                        0x50 => keyboard.push_bytes(b"\x1b[B"),
+                        0x53 => keyboard.push(127),
+                        _ => {}
+                    }
+                    return None;
+                }
                 let byte = decode(code, keyboard.shift)?;
                 if keyboard.ctrl && byte.is_ascii_alphabetic() {
                     Some(byte.to_ascii_lowercase() & 0x1f)
@@ -82,6 +115,10 @@ pub fn decode_scancode(scancode: u8) -> Option<u8> {
 
 pub fn pop_key() -> Option<u8> {
     unsafe { (*KEYBOARD.0.get()).pop() }
+}
+
+pub fn has_key() -> bool {
+    unsafe { (*KEYBOARD.0.get()).has_key() }
 }
 
 pub fn push_key(byte: u8) {
