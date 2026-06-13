@@ -351,12 +351,17 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_SELECT => {
-            frame.rax = select(
+            if let Some(result) = select(
+                frame,
                 frame.rdi as usize,
                 frame.rsi as *mut u8,
                 frame.rdx as *mut u8,
                 frame.r10 as *mut u8,
-            ) as u64;
+                frame.r8 as *const u8,
+                false,
+            ) {
+                frame.rax = result as u64;
+            }
             true
         }
         SYS_MMAP => {
@@ -449,12 +454,17 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_PSELECT6 => {
-            frame.rax = select(
+            if let Some(result) = select(
+                frame,
                 frame.rdi as usize,
                 frame.rsi as *mut u8,
                 frame.rdx as *mut u8,
                 frame.r10 as *mut u8,
-            ) as u64;
+                frame.r8 as *const u8,
+                true,
+            ) {
+                frame.rax = result as u64;
+            }
             true
         }
         SYS_FCNTL => {
@@ -2040,12 +2050,36 @@ fn poll(fds: *mut u8, count: usize) -> i64 {
     ready
 }
 
-fn select(nfds: usize, readfds: *mut u8, writefds: *mut u8, exceptfds: *mut u8) -> i64 {
+fn select(
+    frame: &mut scheduler::TrapFrame,
+    nfds: usize,
+    readfds: *mut u8,
+    writefds: *mut u8,
+    exceptfds: *mut u8,
+    timeout: *const u8,
+    timespec: bool,
+) -> Option<i64> {
     if nfds > 1024 {
-        return EINVAL;
+        return Some(EINVAL);
     }
     if readfds.is_null() && writefds.is_null() && exceptfds.is_null() {
-        return 0;
+        match select_timeout_ticks(timeout, timespec) {
+            TimeoutResult::Ticks(ticks) => {
+                if ticks > 0 {
+                    if let Some(task_switch) =
+                        scheduler::block_current_for_timeout(frame, ticks, scheduler::ticks())
+                    {
+                        unsafe {
+                            arch::load_cr3(task_switch.pml4_phys);
+                        }
+                        return None;
+                    }
+                }
+            }
+            TimeoutResult::Fault => return Some(EFAULT),
+            TimeoutResult::None => {}
+        }
+        return Some(0);
     }
 
     let bytes = (nfds + 7) / 8;
@@ -2053,7 +2087,7 @@ fn select(nfds: usize, readfds: *mut u8, writefds: *mut u8, exceptfds: *mut u8) 
         || (!writefds.is_null() && !user_buffer_readable(writefds as u64, bytes))
         || (!exceptfds.is_null() && !user_buffer_readable(exceptfds as u64, bytes))
     {
-        return EFAULT;
+        return Some(EFAULT);
     }
 
     let mut ready = 0i64;
@@ -2084,7 +2118,59 @@ fn select(nfds: usize, readfds: *mut u8, writefds: *mut u8, exceptfds: *mut u8) 
             }
         }
     }
-    ready
+    if ready == 0 {
+        match select_timeout_ticks(timeout, timespec) {
+            TimeoutResult::Ticks(ticks) => {
+                if ticks > 0 {
+                    if let Some(task_switch) =
+                        scheduler::block_current_for_timeout(frame, ticks, scheduler::ticks())
+                    {
+                        unsafe {
+                            arch::load_cr3(task_switch.pml4_phys);
+                        }
+                        return None;
+                    }
+                }
+            }
+            TimeoutResult::Fault => return Some(EFAULT),
+            TimeoutResult::None => {}
+        }
+    }
+    Some(ready)
+}
+
+enum TimeoutResult {
+    None,
+    Fault,
+    Ticks(u64),
+}
+
+fn select_timeout_ticks(timeout: *const u8, timespec: bool) -> TimeoutResult {
+    if timeout.is_null() {
+        return TimeoutResult::None;
+    }
+    if !user_buffer_readable(timeout as u64, 16) {
+        return TimeoutResult::Fault;
+    }
+    unsafe {
+        let seconds = read_user_u64(timeout) as i64;
+        let fraction = read_user_u64(timeout.add(8)) as i64;
+        if seconds < 0 || fraction < 0 {
+            return TimeoutResult::Ticks(0);
+        }
+        let mut ticks = (seconds as u64).saturating_mul(100);
+        let fraction_ticks = if timespec {
+            (fraction as u64).saturating_add(9_999_999) / 10_000_000
+        } else {
+            (fraction as u64).saturating_add(9_999) / 10_000
+        };
+        ticks = ticks.saturating_add(fraction_ticks);
+        if ticks == 0 && (seconds != 0 || fraction != 0) {
+            TimeoutResult::Ticks(1)
+        } else {
+            TimeoutResult::Ticks(ticks)
+        }
+    }
 }
 
 fn fd_readable(fd: i32) -> bool {

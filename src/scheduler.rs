@@ -69,6 +69,8 @@ struct UserTask {
     waiting_child: bool,
     wait_pid: i32,
     wait_status: u64,
+    waiting_timeout: bool,
+    wake_tick: u64,
     zombie: bool,
     exit_status: i32,
 }
@@ -120,6 +122,8 @@ impl UserTask {
             waiting_child: false,
             wait_pid: 0,
             wait_status: 0,
+            waiting_timeout: false,
+            wake_tick: 0,
             zombie: false,
             exit_status: 0,
         }
@@ -270,6 +274,8 @@ impl UserScheduler {
             waiting_child: false,
             wait_pid: 0,
             wait_status: 0,
+            waiting_timeout: false,
+            wake_tick: 0,
             zombie: false,
             exit_status: 0,
         };
@@ -298,6 +304,8 @@ impl UserScheduler {
         task.waiting_child = false;
         task.wait_pid = 0;
         task.wait_status = 0;
+        task.waiting_timeout = false;
+        task.wake_tick = 0;
         task.zombie = false;
         task.exit_status = 0;
     }
@@ -315,6 +323,7 @@ impl UserScheduler {
                     && !task.waiting_stdin
                     && !task.waiting_pipe_read
                     && !task.waiting_child
+                    && !task.waiting_timeout
                     && !task.zombie)
             {
                 return Some(index);
@@ -442,6 +451,34 @@ impl UserScheduler {
         })
     }
 
+    fn block_current_for_timeout(
+        &mut self,
+        frame: &mut TrapFrame,
+        ticks: u64,
+        now: u64,
+    ) -> Option<UserSwitch> {
+        if !self.is_ready() || self.installed < 2 || frame.cs & 0x3 != 0x3 || ticks == 0 {
+            return None;
+        }
+
+        let current = self.current;
+        let next = self.next_active_from((current + 1) % self.installed)?;
+        self.task_mut(current)?.frame = *frame;
+        self.save_fs_base(current);
+        let task = self.task_mut(current)?;
+        task.active = false;
+        task.waiting_timeout = true;
+        task.wake_tick = now.saturating_add(ticks).max(now + 1);
+        self.current = next;
+        self.restore_fs_base(self.current);
+        let task = *self.task(self.current)?;
+        *frame = task.frame;
+        Some(UserSwitch {
+            name: task.name,
+            pml4_phys: task.pml4_phys,
+        })
+    }
+
     fn wake_stdin_waiter(&mut self) -> Option<StdinWake> {
         if !self.is_ready() {
             return None;
@@ -499,6 +536,23 @@ impl UserScheduler {
         None
     }
 
+    fn wake_timeouts(&mut self, now: u64) {
+        if !self.is_ready() {
+            return;
+        }
+        for index in 0..self.installed {
+            let Some(task) = self.task_mut(index) else {
+                continue;
+            };
+            if task.waiting_timeout && now >= task.wake_tick {
+                task.waiting_timeout = false;
+                task.wake_tick = 0;
+                task.active = true;
+                task.frame.rax = 0;
+            }
+        }
+    }
+
     fn fork_current_to(&mut self, child: usize, child_pml4: u64, frame: &TrapFrame) -> Option<u64> {
         if !self.is_ready() || child >= USER_TASKS || self.installed == 0 {
             return None;
@@ -528,6 +582,8 @@ impl UserScheduler {
         child_task.waiting_child = false;
         child_task.wait_pid = 0;
         child_task.wait_status = 0;
+        child_task.waiting_timeout = false;
+        child_task.wake_tick = 0;
         child_task.zombie = false;
         child_task.exit_status = 0;
         *self.task_mut(child)? = child_task;
@@ -567,6 +623,7 @@ impl UserScheduler {
                 || task.waiting_stdin
                 || task.waiting_pipe_read
                 || task.waiting_child
+                || task.waiting_timeout
                 || task.zombie,
             current: index == self.current,
         })
@@ -756,6 +813,8 @@ impl UserScheduler {
             task.waiting_child = false;
             task.wait_pid = 0;
             task.wait_status = 0;
+            task.waiting_timeout = false;
+            task.wake_tick = 0;
             task.zombie = true;
             task.exit_status = status;
         }
@@ -879,6 +938,8 @@ impl UserScheduler {
             child_task.waiting_stdin = false;
             child_task.waiting_pipe_read = false;
             child_task.waiting_child = false;
+            child_task.waiting_timeout = false;
+            child_task.wake_tick = 0;
             child_task.pid = 0;
             child_task.parent_pid = 0;
             child_task.process_group = 0;
@@ -915,6 +976,7 @@ impl UserScheduler {
                     && (task.active
                         || task.waiting_stdin
                         || task.waiting_pipe_read
+                        || task.waiting_timeout
                         || task.waiting_child));
             if waitable {
                 return Some(index);
@@ -938,6 +1000,8 @@ impl UserScheduler {
             task.waiting_child = false;
             task.wait_pid = 0;
             task.wait_status = 0;
+            task.waiting_timeout = false;
+            task.wake_tick = 0;
             task.zombie = false;
             task.exit_status = 0;
             self.focus = index;
@@ -962,7 +1026,11 @@ impl UserScheduler {
             return false;
         }
         self.task(index).map_or(false, |task| {
-            task.active || task.waiting_stdin || task.waiting_pipe_read || task.waiting_child
+            task.active
+                || task.waiting_stdin
+                || task.waiting_pipe_read
+                || task.waiting_child
+                || task.waiting_timeout
         })
     }
 
@@ -982,6 +1050,8 @@ impl UserScheduler {
             task.pipe_buffer = 0;
             task.waiting_child = false;
             task.wait_pid = 0;
+            task.waiting_timeout = false;
+            task.wake_tick = 0;
             task.pid = 0;
             task.parent_pid = 0;
             task.process_group = 0;
@@ -1053,6 +1123,18 @@ pub fn tick() -> u64 {
     unsafe {
         if let Some(scheduler) = (*SCHEDULER.0.get()).as_mut() {
             scheduler.tick();
+            let ticks = scheduler.ticks();
+            (*USER_SCHEDULER.0.get()).wake_timeouts(ticks);
+            ticks
+        } else {
+            0
+        }
+    }
+}
+
+pub fn ticks() -> u64 {
+    unsafe {
+        if let Some(scheduler) = (*SCHEDULER.0.get()).as_ref() {
             scheduler.ticks()
         } else {
             0
@@ -1132,6 +1214,14 @@ pub fn wait_for_child(frame: &mut TrapFrame, pid: i32) -> WaitResult {
 
 pub fn block_current_for_spawn(frame: &mut TrapFrame) -> Option<UserSwitch> {
     unsafe { (*USER_SCHEDULER.0.get()).block_current_for_child(frame, -1, 0) }
+}
+
+pub fn block_current_for_timeout(
+    frame: &mut TrapFrame,
+    ticks: u64,
+    now: u64,
+) -> Option<UserSwitch> {
+    unsafe { (*USER_SCHEDULER.0.get()).block_current_for_timeout(frame, ticks, now) }
 }
 
 pub fn current_user_index() -> Option<usize> {

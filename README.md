@@ -292,6 +292,8 @@ Already done:
 - Linux ABI readiness probing through `select` and `pselect6`, sharing the same
   descriptor readiness model as `poll` for TTYs, pipes, regular files, and
   standard descriptors.
+- Finite `select`/`pselect6` timeouts can now block the calling task and are
+  woken by the PIT scheduler tick instead of spinning in the syscall path.
 - `/bin/pipecheck`, a small Linux ABI test program that validates a real
   `pipe` + `fork` + `dup2` + `execve` pipeline through Coreutils `echo` and
   `cat`.
@@ -315,8 +317,8 @@ Still useful next:
 
 - Replace the remaining compile-time user process capacity with a growable
   descriptor table and dynamically allocated page-table roots.
-- Expand the Linux/POSIX ABI with blocking `select`/`pselect6` timeouts, richer
-  termios behavior, and job-control semantics.
+- Expand the Linux/POSIX ABI with indefinite FD-driven `select`/`pselect6`
+  wakeups, richer termios behavior, and job-control semantics.
 - Expand the TTY/console subsystem with PTYs, controlling terminals, signal
   delivery, and full job-control semantics so Bash can become the default shell
   again without special cases.
