@@ -6,6 +6,7 @@ const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
+const SYS_SELECT: u64 = 23;
 const SYS_STAT: u64 = 4;
 const SYS_FSTAT: u64 = 5;
 const SYS_LSTAT: u64 = 6;
@@ -81,6 +82,7 @@ const SYS_FACCESSAT: u64 = 269;
 const SYS_SPLICE: u64 = 275;
 const SYS_PIPE2: u64 = 293;
 const SYS_DUP3: u64 = 292;
+const SYS_PSELECT6: u64 = 270;
 const SYS_EXIT_GROUP: u64 = 231;
 const SYS_SET_ROBUST_LIST: u64 = 273;
 const SYS_NEWFSTATAT: u64 = 262;
@@ -348,6 +350,15 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = poll(frame.rdi as *mut u8, frame.rsi as usize) as u64;
             true
         }
+        SYS_SELECT => {
+            frame.rax = select(
+                frame.rdi as usize,
+                frame.rsi as *mut u8,
+                frame.rdx as *mut u8,
+                frame.r10 as *mut u8,
+            ) as u64;
+            true
+        }
         SYS_MMAP => {
             frame.rax = mmap(
                 frame.rdi,
@@ -435,6 +446,15 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
         }
         SYS_FACCESSAT => {
             frame.rax = access_at(frame.rdi as i32, frame.rsi as *const u8) as u64;
+            true
+        }
+        SYS_PSELECT6 => {
+            frame.rax = select(
+                frame.rdi as usize,
+                frame.rsi as *mut u8,
+                frame.rdx as *mut u8,
+                frame.r10 as *mut u8,
+            ) as u64;
             true
         }
         SYS_FCNTL => {
@@ -2002,46 +2022,14 @@ fn poll(fds: *mut u8, count: usize) -> i64 {
             let fd = read_user_i32(base);
             let events = read_user_i16(base.add(4));
             let mut revents = 0i16;
-            if fd == 0 && events & 1 != 0 {
-                if let Some(file) = open_file_any(fd) {
-                    if file.is_pipe && file.pipe_read && pipe_readable(file.pipe_id) {
-                        revents |= 1;
-                    } else if file.is_tty && tty::has_input() {
-                        revents |= 1;
-                    }
-                } else if tty::has_input() {
-                    revents |= 1;
-                }
-            } else if (fd == 1 || fd == 2) && events & 4 != 0 {
-                if let Some(file) = open_file_any(fd) {
-                    if file.is_pipe && file.pipe_write && pipe_writable(file.pipe_id) {
-                        revents |= 4;
-                    } else if file.is_tty {
-                        revents |= 4;
-                    }
-                } else {
-                    revents |= 4;
-                }
-            } else if fd >= FIRST_USER_FD && events != 0 {
-                if let Some(file) = open_file_any(fd) {
-                    if file.is_tty {
-                        if events & 1 != 0 && tty::has_input() {
-                            revents |= 1;
-                        }
-                        if events & 4 != 0 {
-                            revents |= 4;
-                        }
-                    } else if file.is_pipe {
-                        if events & 1 != 0 && file.pipe_read && pipe_readable(file.pipe_id) {
-                            revents |= 1;
-                        }
-                        if events & 4 != 0 && file.pipe_write && pipe_writable(file.pipe_id) {
-                            revents |= 4;
-                        }
-                    } else {
-                        revents |= events & 5;
-                    }
-                }
+            if events & 1 != 0 && fd_readable(fd) {
+                revents |= 1;
+            }
+            if events & 4 != 0 && fd_writable(fd) {
+                revents |= 4;
+            }
+            if events & 2 != 0 && fd_exceptional(fd) {
+                revents |= 2;
             }
             if revents != 0 {
                 ready += 1;
@@ -2050,6 +2038,85 @@ fn poll(fds: *mut u8, count: usize) -> i64 {
         }
     }
     ready
+}
+
+fn select(nfds: usize, readfds: *mut u8, writefds: *mut u8, exceptfds: *mut u8) -> i64 {
+    if nfds > 1024 {
+        return EINVAL;
+    }
+    if readfds.is_null() && writefds.is_null() && exceptfds.is_null() {
+        return 0;
+    }
+
+    let bytes = (nfds + 7) / 8;
+    if (!readfds.is_null() && !user_buffer_readable(readfds as u64, bytes))
+        || (!writefds.is_null() && !user_buffer_readable(writefds as u64, bytes))
+        || (!exceptfds.is_null() && !user_buffer_readable(exceptfds as u64, bytes))
+    {
+        return EFAULT;
+    }
+
+    let mut ready = 0i64;
+    unsafe {
+        for fd in 0..nfds.min(1024) {
+            let bit = 1u8 << (fd & 7);
+            let offset = fd / 8;
+            if !readfds.is_null() && *readfds.add(offset) & bit != 0 {
+                if fd_readable(fd as i32) {
+                    ready += 1;
+                } else {
+                    *readfds.add(offset) &= !bit;
+                }
+            }
+            if !writefds.is_null() && *writefds.add(offset) & bit != 0 {
+                if fd_writable(fd as i32) {
+                    ready += 1;
+                } else {
+                    *writefds.add(offset) &= !bit;
+                }
+            }
+            if !exceptfds.is_null() && *exceptfds.add(offset) & bit != 0 {
+                if fd_exceptional(fd as i32) {
+                    ready += 1;
+                } else {
+                    *exceptfds.add(offset) &= !bit;
+                }
+            }
+        }
+    }
+    ready
+}
+
+fn fd_readable(fd: i32) -> bool {
+    unsafe {
+        let Some(file) = file_for_fd(fd) else {
+            return false;
+        };
+        if file.is_pipe {
+            file.pipe_read && pipe_readable(file.pipe_id)
+        } else if file.is_tty {
+            tty::has_input()
+        } else {
+            true
+        }
+    }
+}
+
+fn fd_writable(fd: i32) -> bool {
+    unsafe {
+        let Some(file) = file_for_fd(fd) else {
+            return false;
+        };
+        if file.is_pipe {
+            file.pipe_write && pipe_writable(file.pipe_id)
+        } else {
+            file.writable || file.is_tty || fd == 1 || fd == 2
+        }
+    }
+}
+
+fn fd_exceptional(fd: i32) -> bool {
+    unsafe { file_for_fd(fd).is_some() && false }
 }
 
 fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {

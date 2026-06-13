@@ -289,6 +289,9 @@ Already done:
   trapframes on the user stack, `sa_restorer` return trampolines, `rt_sigreturn`
   frame restoration, per-handler `sa_mask`, and automatic temporary signal
   masking while a handler runs.
+- Linux ABI readiness probing through `select` and `pselect6`, sharing the same
+  descriptor readiness model as `poll` for TTYs, pipes, regular files, and
+  standard descriptors.
 - `/bin/pipecheck`, a small Linux ABI test program that validates a real
   `pipe` + `fork` + `dup2` + `execve` pipeline through Coreutils `echo` and
   `cat`.
@@ -312,8 +315,8 @@ Still useful next:
 
 - Replace the remaining compile-time user process capacity with a growable
   descriptor table and dynamically allocated page-table roots.
-- Expand the Linux/POSIX ABI with `select`, richer termios behavior, and
-  job-control semantics.
+- Expand the Linux/POSIX ABI with blocking `select`/`pselect6` timeouts, richer
+  termios behavior, and job-control semantics.
 - Expand the TTY/console subsystem with PTYs, controlling terminals, signal
   delivery, and full job-control semantics so Bash can become the default shell
   again without special cases.
