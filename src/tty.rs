@@ -140,6 +140,13 @@ pub fn input_byte(byte: u8) {
         }
 
         match byte {
+            3 => {
+                tty.line_len = 0;
+                echo_byte(b'^');
+                echo_byte(b'C');
+                echo_byte(b'\n');
+                crate::linux_abi::signal_tty_foreground(2);
+            }
             8 | 127 => {
                 if tty.line_len > 0 {
                     tty.line_len -= 1;

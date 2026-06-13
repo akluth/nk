@@ -645,6 +645,24 @@ impl UserScheduler {
         None
     }
 
+    fn task_pid(&self, index: usize) -> Option<u64> {
+        let pid = self.task(index)?.pid;
+        if pid == 0 {
+            None
+        } else {
+            Some(pid)
+        }
+    }
+
+    fn task_process_group(&self, index: usize) -> Option<u64> {
+        let pgid = self.task(index)?.process_group;
+        if pgid == 0 {
+            None
+        } else {
+            Some(pgid)
+        }
+    }
+
     fn process_group_for_pid(&self, pid: u64) -> Option<u64> {
         let index = self.task_index_by_pid(pid)?;
         let pgid = self.task(index)?.process_group;
@@ -1153,6 +1171,18 @@ pub fn current_user_process_group() -> Option<u64> {
 
 pub fn process_group_for_pid(pid: u64) -> Option<u64> {
     unsafe { (*USER_SCHEDULER.0.get()).process_group_for_pid(pid) }
+}
+
+pub fn task_index_for_pid(pid: u64) -> Option<usize> {
+    unsafe { (*USER_SCHEDULER.0.get()).task_index_by_pid(pid) }
+}
+
+pub fn task_pid(index: usize) -> Option<u64> {
+    unsafe { (*USER_SCHEDULER.0.get()).task_pid(index) }
+}
+
+pub fn task_process_group(index: usize) -> Option<u64> {
+    unsafe { (*USER_SCHEDULER.0.get()).task_process_group(index) }
 }
 
 pub fn session_for_pid(pid: u64) -> Option<u64> {

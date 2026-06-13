@@ -52,7 +52,9 @@ const SYS_GETPGRP: u64 = 111;
 const SYS_SETSID: u64 = 112;
 const SYS_GETPGID: u64 = 121;
 const SYS_GETSID: u64 = 124;
+const SYS_KILL: u64 = 62;
 const SYS_TKILL: u64 = 200;
+const SYS_TGKILL: u64 = 234;
 const SYS_ARCH_PRCTL: u64 = 158;
 const SYS_GETXATTR: u64 = 191;
 const SYS_LGETXATTR: u64 = 192;
@@ -104,6 +106,15 @@ const EMFILE: i64 = -24;
 const ENODATA: i64 = -61;
 const ESRCH: i64 = -3;
 const EPERM: i64 = -1;
+const SIG_BLOCK: u64 = 0;
+const SIG_UNBLOCK: u64 = 1;
+const SIG_SETMASK: u64 = 2;
+const SIG_DFL: u64 = 0;
+const SIG_IGN: u64 = 1;
+const SIGKILL: u8 = 9;
+const SIGCHLD: u8 = 17;
+const SIGSTOP: u8 = 19;
+const SIGCONT: u8 = 18;
 
 const O_WRONLY: u64 = 1;
 const O_RDWR: u64 = 2;
@@ -171,8 +182,9 @@ const PIPE_CAP: usize = 8192;
 static OPEN_FILES: GlobalOpenFiles = GlobalOpenFiles(UnsafeCell::new(
     [[OpenFile::empty(); MAX_OPEN_FILES]; scheduler::USER_TASKS],
 ));
-static STD_FILES: GlobalStdFiles =
-    GlobalStdFiles(UnsafeCell::new([[OpenFile::empty(); 3]; scheduler::USER_TASKS]));
+static STD_FILES: GlobalStdFiles = GlobalStdFiles(UnsafeCell::new(
+    [[OpenFile::empty(); 3]; scheduler::USER_TASKS],
+));
 static mut FD_BUFFERS: [[[u8; FD_BUFFER_CAP]; MAX_OPEN_FILES]; scheduler::USER_TASKS] =
     [[[0; FD_BUFFER_CAP]; MAX_OPEN_FILES]; scheduler::USER_TASKS];
 static mut TASK_CWDS: [[u8; 256]; scheduler::USER_TASKS] = [[0; 256]; scheduler::USER_TASKS];
@@ -181,6 +193,10 @@ static mut MMAP_CURSORS: [u64; scheduler::USER_TASKS] = [USER_MMAP_START; schedu
 static mut PROGRAM_BREAKS: [u64; scheduler::USER_TASKS] = [USER_BRK_START; scheduler::USER_TASKS];
 static mut STDOUT_BUDGETS: [isize; scheduler::USER_TASKS] = [-1; scheduler::USER_TASKS];
 static mut UNKNOWN_LOGS: u64 = 0;
+static mut SIGNAL_HANDLERS: [[u64; 64]; scheduler::USER_TASKS] =
+    [[SIG_DFL; 64]; scheduler::USER_TASKS];
+static mut SIGNAL_MASKS: [u64; scheduler::USER_TASKS] = [0; scheduler::USER_TASKS];
+static mut SIGNAL_PENDING: [u64; scheduler::USER_TASKS] = [0; scheduler::USER_TASKS];
 
 #[derive(Clone, Copy)]
 struct Pipe {
@@ -221,6 +237,9 @@ pub fn reset_process_state(index: usize) {
         MMAP_CURSORS[index] = USER_MMAP_START;
         PROGRAM_BREAKS[index] = USER_BRK_START;
         STDOUT_BUDGETS[index] = -1;
+        SIGNAL_HANDLERS[index] = [SIG_DFL; 64];
+        SIGNAL_MASKS[index] = 0;
+        SIGNAL_PENDING[index] = 0;
         tty::reset_task(index);
         for file in &mut (*STD_FILES.0.get())[index] {
             close_open_file(file);
@@ -243,6 +262,9 @@ pub fn reset_exec_state(index: usize) {
         MMAP_CURSORS[index] = USER_MMAP_START;
         PROGRAM_BREAKS[index] = USER_BRK_START;
         STDOUT_BUDGETS[index] = -1;
+        SIGNAL_HANDLERS[index] = [SIG_DFL; 64];
+        SIGNAL_MASKS[index] = 0;
+        SIGNAL_PENDING[index] = 0;
         tty::reset_task(index);
         if TASK_CWD_LENS[index] == 0 {
             TASK_CWDS[index][0] = b'/';
@@ -259,6 +281,11 @@ pub fn set_stdout_budget_for(index: usize, bytes: usize) {
     }
 }
 
+pub fn signal_tty_foreground(signal: u8) {
+    let pgid = tty::foreground_pgid();
+    let _ = signal_process_group(pgid, signal);
+}
+
 fn current_task_index() -> usize {
     scheduler::current_user_index()
         .filter(|index| *index < scheduler::USER_TASKS)
@@ -266,6 +293,9 @@ fn current_task_index() -> usize {
 }
 
 pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
+    if deliver_pending_signal(frame) {
+        return true;
+    }
     match frame.rax {
         SYS_READ => {
             if let Some(result) = read(
@@ -307,8 +337,14 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_MMAP => {
-            frame.rax =
-                mmap(frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8 as i64, frame.r9) as u64;
+            frame.rax = mmap(
+                frame.rdi,
+                frame.rsi,
+                frame.rdx,
+                frame.r10,
+                frame.r8 as i64,
+                frame.r9,
+            ) as u64;
             true
         }
         SYS_MUNMAP => {
@@ -323,8 +359,17 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = 0;
             true
         }
-        SYS_RT_SIGACTION | SYS_RT_SIGPROCMASK => {
-            frame.rax = 0;
+        SYS_RT_SIGACTION => {
+            frame.rax = rt_sigaction(
+                frame.rdi as u8,
+                frame.rsi as *const u8,
+                frame.rdx as *mut u8,
+            ) as u64;
+            true
+        }
+        SYS_RT_SIGPROCMASK => {
+            frame.rax =
+                rt_sigprocmask(frame.rdi, frame.rsi as *const u8, frame.rdx as *mut u8) as u64;
             true
         }
         SYS_IOCTL => {
@@ -521,12 +566,20 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = getsid(frame.rdi) as u64;
             true
         }
+        SYS_KILL => {
+            frame.rax = kill(frame.rdi as i64, frame.rsi as u8) as u64;
+            true
+        }
         SYS_ARCH_PRCTL => {
             frame.rax = arch_prctl(frame.rdi, frame.rsi) as u64;
             true
         }
         SYS_TKILL => {
-            frame.rax = 0;
+            frame.rax = tkill(frame.rdi, frame.rsi as u8) as u64;
+            true
+        }
+        SYS_TGKILL => {
+            frame.rax = tkill(frame.rsi, frame.rdx as u8) as u64;
             true
         }
         SYS_GETXATTR | SYS_LGETXATTR | SYS_FGETXATTR => {
@@ -2252,7 +2305,8 @@ fn mkdir_at(dirfd: i32, path: *const u8) -> i64 {
         return ENOENT;
     }
     let mut resolved = [0u8; 256];
-    let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
+    let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false)
+    else {
         return ENOENT;
     };
     if nkfs::exists(&resolved[..path_len]) {
@@ -2272,7 +2326,8 @@ fn rmdir_at(dirfd: i32, path: *const u8) -> i64 {
         return ENOENT;
     }
     let mut resolved = [0u8; 256];
-    let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
+    let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false)
+    else {
         return ENOENT;
     };
     if nkfs::remove_dir(&resolved[..path_len]) {
@@ -2317,10 +2372,7 @@ fn rename_at(
     if nkfs::exists(&resolved_new[..new_path_len]) {
         return EEXIST;
     }
-    if nkfs::rename_path(
-        &resolved_old[..old_path_len],
-        &resolved_new[..new_path_len],
-    ) {
+    if nkfs::rename_path(&resolved_old[..old_path_len], &resolved_new[..new_path_len]) {
         0
     } else {
         ENOENT
@@ -2334,7 +2386,8 @@ fn unlink_at(dirfd: i32, path: *const u8, flags: u64) -> i64 {
         return ENOENT;
     }
     let mut resolved = [0u8; 256];
-    let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
+    let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false)
+    else {
         return ENOENT;
     };
     let removed = if flags & AT_REMOVEDIR != 0 {
@@ -2360,6 +2413,179 @@ fn getrandom(buffer: *mut u8, len: usize) -> i64 {
         }
     }
     count as i64
+}
+
+fn signal_bit(signal: u8) -> Option<u64> {
+    if signal == 0 || signal >= 64 {
+        None
+    } else {
+        Some(1u64 << signal)
+    }
+}
+
+fn valid_signal(signal: u8) -> bool {
+    signal > 0 && signal < 64
+}
+
+fn rt_sigaction(signal: u8, action: *const u8, old_action: *mut u8) -> i64 {
+    if !valid_signal(signal) || signal == SIGKILL || signal == SIGSTOP {
+        return EINVAL;
+    }
+    let index = current_task_index();
+    unsafe {
+        if !old_action.is_null() {
+            write_user_u64(old_action, SIGNAL_HANDLERS[index][signal as usize]);
+            write_user_u64(old_action.add(8), 0);
+            write_user_u64(old_action.add(16), 0);
+            write_user_u64(old_action.add(24), SIGNAL_MASKS[index]);
+        }
+        if !action.is_null() {
+            if !user_buffer_readable(action as u64, 32) {
+                return EFAULT;
+            }
+            SIGNAL_HANDLERS[index][signal as usize] = read_user_u64(action);
+        }
+    }
+    0
+}
+
+fn rt_sigprocmask(how: u64, set: *const u8, old_set: *mut u8) -> i64 {
+    let index = current_task_index();
+    unsafe {
+        if !old_set.is_null() {
+            write_user_u64(old_set, SIGNAL_MASKS[index]);
+        }
+        if set.is_null() {
+            return 0;
+        }
+        if !user_buffer_readable(set as u64, 8) {
+            return EFAULT;
+        }
+        let unblockable = signal_bit(SIGKILL).unwrap_or(0) | signal_bit(SIGSTOP).unwrap_or(0);
+        let mask = read_user_u64(set) & !unblockable;
+        match how {
+            SIG_BLOCK => SIGNAL_MASKS[index] |= mask,
+            SIG_UNBLOCK => SIGNAL_MASKS[index] &= !mask,
+            SIG_SETMASK => SIGNAL_MASKS[index] = mask,
+            _ => return EINVAL,
+        }
+    }
+    0
+}
+
+fn kill(pid: i64, signal: u8) -> i64 {
+    if signal != 0 && !valid_signal(signal) {
+        return EINVAL;
+    }
+    if pid > 0 {
+        return signal_pid(pid as u64, signal);
+    }
+    if pid == 0 {
+        let Some(pgid) = scheduler::current_user_process_group() else {
+            return ESRCH;
+        };
+        return signal_process_group(pgid, signal);
+    }
+    if pid == -1 {
+        let mut delivered = false;
+        for index in 0..scheduler::USER_TASKS {
+            if scheduler::task_pid(index).is_some() {
+                delivered |= signal_task_index(index, signal);
+            }
+        }
+        return if delivered { 0 } else { ESRCH };
+    }
+    signal_process_group((-pid) as u64, signal)
+}
+
+fn tkill(pid: u64, signal: u8) -> i64 {
+    if signal != 0 && !valid_signal(signal) {
+        return EINVAL;
+    }
+    signal_pid(pid, signal)
+}
+
+fn signal_pid(pid: u64, signal: u8) -> i64 {
+    let Some(index) = scheduler::task_index_for_pid(pid) else {
+        return ESRCH;
+    };
+    if signal == 0 || signal_task_index(index, signal) {
+        0
+    } else {
+        ESRCH
+    }
+}
+
+fn signal_process_group(pgid: u64, signal: u8) -> i64 {
+    let mut delivered = false;
+    for index in 0..scheduler::USER_TASKS {
+        if scheduler::task_process_group(index) == Some(pgid) {
+            delivered |= signal == 0 || signal_task_index(index, signal);
+        }
+    }
+    if delivered {
+        0
+    } else {
+        ESRCH
+    }
+}
+
+fn signal_task_index(index: usize, signal: u8) -> bool {
+    let Some(bit) = signal_bit(signal) else {
+        return false;
+    };
+    unsafe {
+        if index >= scheduler::USER_TASKS || scheduler::task_pid(index).is_none() {
+            return false;
+        }
+        SIGNAL_PENDING[index] |= bit;
+    }
+    true
+}
+
+fn deliver_pending_signal(frame: &mut scheduler::TrapFrame) -> bool {
+    let Some(index) = scheduler::current_user_index() else {
+        return false;
+    };
+    unsafe {
+        let pending = SIGNAL_PENDING[index] & !SIGNAL_MASKS[index];
+        if pending == 0 {
+            return false;
+        }
+        for signal in 1..64u8 {
+            let bit = 1u64 << signal;
+            if pending & bit == 0 {
+                continue;
+            }
+            SIGNAL_PENDING[index] &= !bit;
+            let handler = SIGNAL_HANDLERS[index][signal as usize];
+            if handler == SIG_IGN || (handler == SIG_DFL && default_ignores_signal(signal)) {
+                return false;
+            }
+            if handler != SIG_DFL {
+                SIGNAL_PENDING[index] |= bit;
+                return false;
+            }
+            if default_terminates_signal(signal) {
+                if let Some(pml4_phys) = scheduler::exit_current_user(frame, 128 + signal as i32) {
+                    crate::arch::load_cr3(pml4_phys);
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn default_ignores_signal(signal: u8) -> bool {
+    signal == SIGCHLD || signal == SIGCONT
+}
+
+fn default_terminates_signal(signal: u8) -> bool {
+    matches!(
+        signal,
+        1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15
+    )
 }
 
 fn getpgid(pid: u64) -> i64 {
