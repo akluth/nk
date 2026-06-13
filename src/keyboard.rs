@@ -7,6 +7,7 @@ struct KeyboardBuffer {
     read: usize,
     write: usize,
     shift: bool,
+    ctrl: bool,
 }
 
 impl KeyboardBuffer {
@@ -16,6 +17,7 @@ impl KeyboardBuffer {
             read: 0,
             write: 0,
             shift: false,
+            ctrl: false,
         }
     }
 
@@ -57,8 +59,23 @@ pub fn decode_scancode(scancode: u8) -> Option<u8> {
                 keyboard.shift = false;
                 return None;
             }
+            0x1d => {
+                keyboard.ctrl = true;
+                return None;
+            }
+            0x9d => {
+                keyboard.ctrl = false;
+                return None;
+            }
             code if code & 0x80 != 0 => return None,
-            code => return decode(code, keyboard.shift),
+            code => {
+                let byte = decode(code, keyboard.shift)?;
+                if keyboard.ctrl && byte.is_ascii_alphabetic() {
+                    Some(byte.to_ascii_lowercase() & 0x1f)
+                } else {
+                    Some(byte)
+                }
+            }
         }
     }
 }

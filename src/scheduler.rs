@@ -397,6 +397,21 @@ impl UserScheduler {
         None
     }
 
+    fn stdin_waiter_index(&self) -> Option<usize> {
+        if !self.is_ready() {
+            return None;
+        }
+        for index in 0..self.installed {
+            let Some(task) = self.task(index) else {
+                continue;
+            };
+            if task.waiting_stdin {
+                return Some(index);
+            }
+        }
+        None
+    }
+
     fn fork_current_to(&mut self, child: usize, child_pml4: u64, frame: &TrapFrame) -> Option<u64> {
         if !self.is_ready() || child >= USER_TASKS || self.installed == 0 {
             return None;
@@ -849,6 +864,10 @@ pub fn block_current_for_stdin(frame: &mut TrapFrame, buffer: u64) -> Option<Use
 
 pub fn wake_stdin_waiter() -> Option<StdinWake> {
     unsafe { (*USER_SCHEDULER.0.get()).wake_stdin_waiter() }
+}
+
+pub fn stdin_waiter_index() -> Option<usize> {
+    unsafe { (*USER_SCHEDULER.0.get()).stdin_waiter_index() }
 }
 
 pub fn fork_current_user_to(child: usize, child_pml4: u64, frame: &TrapFrame) -> Option<u64> {

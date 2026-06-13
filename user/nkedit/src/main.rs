@@ -7,23 +7,35 @@ const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
+const SYS_IOCTL: u64 = 16;
 const SYS_EXIT: u64 = 60;
 
 const STDIN: i32 = 0;
 const STDOUT: i32 = 1;
 const STDERR: i32 = 2;
 
+const TCGETS: u64 = 0x5401;
+const TCSETS: u64 = 0x5402;
+
 const O_WRONLY: u64 = 1;
 const O_CREAT: u64 = 0x40;
 const O_TRUNC: u64 = 0x200;
 
+const CTRL_S: u8 = 19;
+const CTRL_X: u8 = 24;
+const BACKSPACE: u8 = 8;
+const DELETE: u8 = 127;
+
 const BUFFER_CAP: usize = 32 * 1024;
-const LINE_CAP: usize = 512;
 const PATH_CAP: usize = 256;
+const SCREEN_COLS: usize = 80;
+const SCREEN_ROWS: usize = 24;
+const TEXT_ROWS: usize = 21;
 
 static mut BUFFER: [u8; BUFFER_CAP] = [0; BUFFER_CAP];
-static mut LINE: [u8; LINE_CAP] = [0; LINE_CAP];
 static mut PATH: [u8; PATH_CAP] = [0; PATH_CAP];
+static mut ORIGINAL_TERMIOS: [u8; 64] = [0; 64];
+static mut RAW_TERMIOS: [u8; 64] = [0; 64];
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
@@ -45,66 +57,56 @@ fn main(stack: *const u64) -> i32 {
         return 2;
     };
 
-    let mut editor = Editor { path, len: 0, dirty: false };
+    enable_raw_mode();
+    let mut editor = Editor {
+        path,
+        len: 0,
+        cursor: 0,
+        top_line: 0,
+        dirty: false,
+        status: b"Ctrl-S save | Ctrl-X exit",
+    };
     editor.load();
-    editor.banner();
-    editor.print();
+    editor.render();
 
     loop {
-        write_all(STDOUT, b"\nnkedit> ");
-        let line = read_line();
-        let input = trim(line);
-        match input.first().copied() {
-            Some(b'a') => editor.append_mode(),
-            Some(b'c') => editor.clear(),
-            Some(b'h') | Some(b'?') => editor.help(),
-            Some(b'p') => editor.print(),
-            Some(b'q') => {
+        let key = read_key();
+        match key {
+            CTRL_S => editor.save(),
+            CTRL_X => {
                 if editor.dirty {
-                    write_all(STDOUT, b"unsaved changes; use Q to quit anyway or w to save\n");
+                    editor.status = b"Unsaved changes. Ctrl-S saves, Ctrl-X again quits";
+                    editor.dirty = false;
+                    editor.render();
                 } else {
+                    disable_raw_mode();
+                    clear_screen();
                     return 0;
                 }
             }
-            Some(b'Q') => return 0,
-            Some(b'w') => editor.save(),
-            Some(_) => editor.help(),
-            None => {}
+            BACKSPACE | DELETE => editor.backspace(),
+            b'\r' | b'\n' => editor.insert(b'\n'),
+            byte if byte >= 0x20 => editor.insert(byte),
+            _ => {}
         }
+        editor.render();
     }
 }
 
 struct Editor {
     path: &'static [u8],
     len: usize,
+    cursor: usize,
+    top_line: usize,
     dirty: bool,
+    status: &'static [u8],
 }
 
 impl Editor {
-    fn banner(&self) {
-        write_all(STDOUT, b"nkedit 0.1 - ");
-        write_all(STDOUT, self.display_path());
-        write_all(STDOUT, b"\ncommands: a append, p print, w write, c clear, q quit, Q force quit, h help\n");
-    }
-
-    fn display_path(&self) -> &[u8] {
-        self.path.strip_suffix(&[0]).unwrap_or(self.path)
-    }
-
-    fn help(&self) {
-        write_all(STDOUT, b"commands:\n");
-        write_all(STDOUT, b"  a  append lines; finish append with a single '.' line\n");
-        write_all(STDOUT, b"  p  print buffer\n");
-        write_all(STDOUT, b"  w  write file\n");
-        write_all(STDOUT, b"  c  clear buffer\n");
-        write_all(STDOUT, b"  q  quit if saved\n");
-        write_all(STDOUT, b"  Q  quit without saving\n");
-    }
-
     fn load(&mut self) {
         let fd = sys_open(self.path.as_ptr(), 0) as i64;
         if fd < 0 {
-            write_all(STDOUT, b"new file\n");
+            self.status = b"New file";
             return;
         }
         while self.len < BUFFER_CAP {
@@ -121,59 +123,89 @@ impl Editor {
             self.len += read as usize;
         }
         sys_close(fd as i32);
-        if self.len == BUFFER_CAP {
-            write_all(STDOUT, b"nkedit: file truncated in editor buffer\n");
-        }
-    }
-
-    fn print(&self) {
-        write_all(STDOUT, b"----- buffer -----\n");
-        if self.len == 0 {
-            write_all(STDOUT, b"(empty)\n");
+        self.status = if self.len == BUFFER_CAP {
+            b"File truncated to editor buffer"
         } else {
-            unsafe {
-                write_all(STDOUT, &BUFFER[..self.len]);
-                if BUFFER[self.len - 1] != b'\n' {
-                    write_all(STDOUT, b"\n");
+            b"Loaded"
+        };
+    }
+
+    fn render(&mut self) {
+        self.keep_cursor_visible();
+        write_all(STDOUT, b"\x1b[2J\x1b[H");
+        write_all(STDOUT, b"nkedit ");
+        write_all(STDOUT, self.display_path());
+        if self.dirty {
+            write_all(STDOUT, b" *");
+        }
+        write_all(STDOUT, b"\x1b[K");
+
+        for row in 0..TEXT_ROWS {
+            move_cursor(row + 2, 1);
+            write_all(STDOUT, b"\x1b[K");
+            if let Some((start, end)) = self.line_bounds(self.top_line + row) {
+                let count = (end - start).min(SCREEN_COLS);
+                unsafe {
+                    write_all(STDOUT, &BUFFER[start..start + count]);
                 }
+            } else {
+                write_all(STDOUT, b"~");
             }
         }
-        write_all(STDOUT, b"------------------\n");
+
+        move_cursor(SCREEN_ROWS, 1);
+        write_all(STDOUT, b"^S Save  ^X Exit  ");
+        write_all(STDOUT, self.status);
+        write_all(STDOUT, b"\x1b[K");
+
+        let (line, col) = self.cursor_line_col();
+        let screen_row = line.saturating_sub(self.top_line).min(TEXT_ROWS - 1) + 2;
+        let screen_col = col.min(SCREEN_COLS - 1) + 1;
+        move_cursor(screen_row, screen_col);
     }
 
-    fn append_mode(&mut self) {
-        write_all(STDOUT, b"append mode; single '.' line ends append\n");
-        loop {
-            write_all(STDOUT, b"> ");
-            let line = read_line();
-            let trimmed = trim(line);
-            if trimmed == b"." {
-                break;
-            }
-            if self.len + line.len() + 1 > BUFFER_CAP {
-                write_all(STDERR, b"nkedit: buffer full\n");
-                break;
-            }
-            unsafe {
-                BUFFER[self.len..self.len + line.len()].copy_from_slice(line);
-                self.len += line.len();
-                BUFFER[self.len] = b'\n';
-                self.len += 1;
-            }
-            self.dirty = true;
+    fn insert(&mut self, byte: u8) {
+        if self.len >= BUFFER_CAP {
+            self.status = b"Buffer full";
+            return;
         }
-    }
-
-    fn clear(&mut self) {
-        self.len = 0;
+        unsafe {
+            let buffer = ptr::addr_of_mut!(BUFFER).cast::<u8>();
+            let mut index = self.len;
+            while index > self.cursor {
+                *buffer.add(index) = *buffer.add(index - 1);
+                index -= 1;
+            }
+            *buffer.add(self.cursor) = byte;
+        }
+        self.cursor += 1;
+        self.len += 1;
         self.dirty = true;
-        write_all(STDOUT, b"buffer cleared\n");
+        self.status = b"Modified";
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        unsafe {
+            let buffer = ptr::addr_of_mut!(BUFFER).cast::<u8>();
+            let mut index = self.cursor - 1;
+            while index + 1 < self.len {
+                *buffer.add(index) = *buffer.add(index + 1);
+                index += 1;
+            }
+        }
+        self.cursor -= 1;
+        self.len -= 1;
+        self.dirty = true;
+        self.status = b"Modified";
     }
 
     fn save(&mut self) {
         let fd = sys_open(self.path.as_ptr(), O_WRONLY | O_CREAT | O_TRUNC) as i64;
         if fd < 0 {
-            write_all(STDERR, b"nkedit: open for write failed\n");
+            self.status = b"Save failed: open";
             return;
         }
         let mut written = 0usize;
@@ -187,15 +219,124 @@ impl Editor {
             };
             if count <= 0 {
                 sys_close(fd as i32);
-                write_all(STDERR, b"nkedit: write failed\n");
+                self.status = b"Save failed: write";
                 return;
             }
             written += count as usize;
         }
         sys_close(fd as i32);
         self.dirty = false;
-        write_all(STDOUT, b"saved\n");
+        self.status = b"Saved";
     }
+
+    fn display_path(&self) -> &[u8] {
+        self.path.strip_suffix(&[0]).unwrap_or(self.path)
+    }
+
+    fn line_bounds(&self, target: usize) -> Option<(usize, usize)> {
+        let mut line = 0usize;
+        let mut start = 0usize;
+        let mut index = 0usize;
+        unsafe {
+            while index <= self.len {
+                if index == self.len || BUFFER[index] == b'\n' {
+                    if line == target {
+                        return Some((start, index));
+                    }
+                    line += 1;
+                    index += 1;
+                    start = index;
+                } else {
+                    index += 1;
+                }
+            }
+        }
+        None
+    }
+
+    fn cursor_line_col(&self) -> (usize, usize) {
+        let mut line = 0usize;
+        let mut col = 0usize;
+        unsafe {
+            for index in 0..self.cursor.min(self.len) {
+                if BUFFER[index] == b'\n' {
+                    line += 1;
+                    col = 0;
+                } else {
+                    col += 1;
+                }
+            }
+        }
+        (line, col)
+    }
+
+    fn keep_cursor_visible(&mut self) {
+        let (line, _) = self.cursor_line_col();
+        if line < self.top_line {
+            self.top_line = line;
+        } else if line >= self.top_line + TEXT_ROWS {
+            self.top_line = line - TEXT_ROWS + 1;
+        }
+    }
+}
+
+fn enable_raw_mode() {
+    unsafe {
+        let original = ptr::addr_of_mut!(ORIGINAL_TERMIOS).cast::<u8>();
+        if sys_ioctl(STDIN, TCGETS, original) != 0 {
+            return;
+        }
+        let raw = ptr::addr_of_mut!(RAW_TERMIOS).cast::<u8>();
+        for index in 0..64 {
+            *raw.add(index) = *original.add(index);
+        }
+        for index in 12..16 {
+            *raw.add(index) = 0;
+        }
+        let _ = sys_ioctl(STDIN, TCSETS, raw);
+    }
+}
+
+fn disable_raw_mode() {
+    let _ = sys_ioctl(STDIN, TCSETS, ptr::addr_of_mut!(ORIGINAL_TERMIOS).cast::<u8>());
+}
+
+fn clear_screen() {
+    write_all(STDOUT, b"\x1b[2J\x1b[H");
+}
+
+fn move_cursor(row: usize, col: usize) {
+    let mut bytes = [0u8; 24];
+    let mut len = 0usize;
+    bytes[len] = 0x1b;
+    len += 1;
+    bytes[len] = b'[';
+    len += 1;
+    len += push_dec(row, &mut bytes[len..]);
+    bytes[len] = b';';
+    len += 1;
+    len += push_dec(col, &mut bytes[len..]);
+    bytes[len] = b'H';
+    len += 1;
+    write_all(STDOUT, &bytes[..len]);
+}
+
+fn push_dec(mut value: usize, out: &mut [u8]) -> usize {
+    if value == 0 {
+        out[0] = b'0';
+        return 1;
+    }
+    let mut tmp = [0u8; 20];
+    let mut len = 0usize;
+    while value > 0 {
+        tmp[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    for index in 0..len {
+        out[index] = tmp[len - index - 1];
+    }
+    len
 }
 
 fn first_arg(stack: *const u64) -> Option<&'static [u8]> {
@@ -237,36 +378,14 @@ fn cstr(ptr: *const u8) -> Option<&'static [u8]> {
     }
 }
 
-fn read_line() -> &'static [u8] {
-    let mut len = 0usize;
+fn read_key() -> u8 {
+    let mut byte = [0u8; 1];
     loop {
-        let mut byte = [0u8; 1];
         let read = sys_read(STDIN, byte.as_mut_ptr(), 1) as i64;
-        if read <= 0 {
-            continue;
-        }
-        let ch = byte[0];
-        if ch == b'\n' || ch == b'\r' {
-            break;
-        }
-        if len < LINE_CAP - 1 {
-            unsafe {
-                LINE[len] = ch;
-            }
-            len += 1;
+        if read == 1 {
+            return byte[0];
         }
     }
-    unsafe { &LINE[..len] }
-}
-
-fn trim(mut input: &[u8]) -> &[u8] {
-    while input.first() == Some(&b' ') || input.first() == Some(&b'\t') {
-        input = &input[1..];
-    }
-    while input.last() == Some(&b' ') || input.last() == Some(&b'\t') {
-        input = &input[..input.len() - 1];
-    }
-    input
 }
 
 fn write_all(fd: i32, mut bytes: &[u8]) {
@@ -293,6 +412,10 @@ fn sys_open(path: *const u8, flags: u64) -> u64 {
 
 fn sys_close(fd: i32) -> u64 {
     syscall1(SYS_CLOSE, fd as u64)
+}
+
+fn sys_ioctl(fd: i32, request: u64, argp: *mut u8) -> i64 {
+    syscall3(SYS_IOCTL, fd as u64, request, argp as u64) as i64
 }
 
 fn exit(code: i32) -> ! {
@@ -350,5 +473,6 @@ fn syscall3(id: u64, a: u64, b: u64, c: u64) -> u64 {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
+    disable_raw_mode();
     exit(101)
 }

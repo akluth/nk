@@ -49,8 +49,9 @@ writable nkfs root filesystem disk.
   `fork`/`execve`/`wait4` path; examples such as `ls /bin`, `echo ok`, and
   `cat /hello.txt` run against the nkfs root disk.
 - `nsh` has a tiny built-in `edit <path>` command plus `/bin/nkedit`, a
-  separate slim userland editor ELF that uses normal Linux-style file syscalls.
-  `/bin/nasm` can assemble `/home/root/hello.asm` into a new persistent
+  separate slim full-screen userland editor ELF. `nkedit` uses normal
+  Linux-style terminal and file syscalls, with `Ctrl-S` to save and `Ctrl-X` to
+  exit. `/bin/nasm` can assemble `/home/root/hello.asm` into a new persistent
   executable that immediately runs in Ring 3.
 
 ## Architecture

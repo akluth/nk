@@ -148,6 +148,7 @@ static mut TASK_CWD_LENS: [usize; scheduler::USER_TASKS] = [0; scheduler::USER_T
 static mut MMAP_CURSORS: [u64; scheduler::USER_TASKS] = [USER_MMAP_START; scheduler::USER_TASKS];
 static mut PROGRAM_BREAKS: [u64; scheduler::USER_TASKS] = [USER_BRK_START; scheduler::USER_TASKS];
 static mut STDOUT_BUDGETS: [isize; scheduler::USER_TASKS] = [-1; scheduler::USER_TASKS];
+static mut STDIN_RAW: [bool; scheduler::USER_TASKS] = [false; scheduler::USER_TASKS];
 static mut UNKNOWN_LOGS: u64 = 0;
 
 pub fn reset_process_state(index: usize) {
@@ -158,6 +159,7 @@ pub fn reset_process_state(index: usize) {
         MMAP_CURSORS[index] = USER_MMAP_START;
         PROGRAM_BREAKS[index] = USER_BRK_START;
         STDOUT_BUDGETS[index] = -1;
+        STDIN_RAW[index] = false;
         for file in &mut (*OPEN_FILES.0.get())[index] {
             *file = OpenFile::empty();
         }
@@ -738,6 +740,12 @@ fn read_stdin(frame: &mut scheduler::TrapFrame, buffer: *mut u8, len: usize) -> 
 
 pub fn handle_stdin_key(byte: u8) {
     unsafe {
+        let task = scheduler::stdin_waiter_index().unwrap_or_else(current_task_index);
+        if STDIN_RAW[task] {
+            push_ready_byte(byte);
+            wake_stdin_reader();
+            return;
+        }
         match byte {
             8 | 127 => {
                 if INPUT_LINE_LEN > 0 {
@@ -778,6 +786,14 @@ unsafe fn push_ready_input(byte: u8) {
         READY_INPUT[READY_WRITE] = INPUT_LINE[index];
         READY_WRITE = next;
     }
+    let next = (READY_WRITE + 1) % READY_INPUT_CAP;
+    if next != READY_READ {
+        READY_INPUT[READY_WRITE] = byte;
+        READY_WRITE = next;
+    }
+}
+
+unsafe fn push_ready_byte(byte: u8) {
     let next = (READY_WRITE + 1) % READY_INPUT_CAP;
     if next != READY_READ {
         READY_INPUT[READY_WRITE] = byte;
@@ -1395,7 +1411,7 @@ fn ioctl(fd: i32, request: u64, argp: *mut u8) -> i64 {
 
     match request {
         0x5401 => write_termios(argp),
-        0x5402 | 0x5403 | 0x5404 => 0,
+        0x5402 | 0x5403 | 0x5404 => set_termios(argp),
         0x5405 | 0x5406 | 0x5413 => write_winsize(argp),
         _ => 0,
     }
@@ -1466,7 +1482,9 @@ fn write_termios(argp: *mut u8) -> i64 {
         let iflag = 0u32.to_le_bytes();
         let oflag = 1u32.to_le_bytes();
         let cflag = 0xbf_u32.to_le_bytes();
-        let lflag = 0x8a3b_u32.to_le_bytes();
+        let raw = STDIN_RAW[current_task_index()];
+        let lflag_value = if raw { 0u32 } else { 0x8a3b_u32 };
+        let lflag = lflag_value.to_le_bytes();
         for (index, byte) in iflag.iter().enumerate() {
             *argp.add(index) = *byte;
         }
@@ -1480,6 +1498,17 @@ fn write_termios(argp: *mut u8) -> i64 {
             *argp.add(12 + index) = *byte;
         }
         *argp.add(19) = 8;
+    }
+    0
+}
+
+fn set_termios(argp: *mut u8) -> i64 {
+    if argp.is_null() {
+        return EFAULT;
+    }
+    unsafe {
+        let lflag = read_user_u32(argp.add(12));
+        STDIN_RAW[current_task_index()] = lflag & 0x0a == 0;
     }
     0
 }
@@ -1913,6 +1942,14 @@ unsafe fn read_user_u64(ptr: *const u8) -> u64 {
         *byte = *ptr.add(index);
     }
     u64::from_le_bytes(bytes)
+}
+
+unsafe fn read_user_u32(ptr: *const u8) -> u32 {
+    let mut bytes = [0u8; 4];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = *ptr.add(index);
+    }
+    u32::from_le_bytes(bytes)
 }
 
 unsafe fn write_user_u16(ptr: *mut u8, value: u16) {

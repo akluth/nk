@@ -28,7 +28,9 @@ pub mod gui {
     static mut TEXT_ROW: usize = 0;
     static mut ANSI_STATE: u8 = 0;
     static mut CSI_VALUE: usize = 0;
+    static mut CSI_SECOND_VALUE: usize = 0;
     static mut CSI_HAS_VALUE: bool = false;
+    static mut CSI_HAS_SECOND_VALUE: bool = false;
     static mut KERNEL_LOG_VISIBLE: bool = true;
 
     pub fn install(framebuffer: Framebuffer) {
@@ -218,7 +220,9 @@ pub mod gui {
         TEXT_ROW = 0;
         ANSI_STATE = 0;
         CSI_VALUE = 0;
+        CSI_SECOND_VALUE = 0;
         CSI_HAS_VALUE = false;
+        CSI_HAS_SECOND_VALUE = false;
     }
 
     fn reset_terminal_screen() {
@@ -265,7 +269,9 @@ pub mod gui {
                 if byte == b'[' {
                     ANSI_STATE = 2;
                     CSI_VALUE = 0;
+                    CSI_SECOND_VALUE = 0;
                     CSI_HAS_VALUE = false;
+                    CSI_HAS_SECOND_VALUE = false;
                 } else {
                     ANSI_STATE = 0;
                 }
@@ -273,13 +279,24 @@ pub mod gui {
             }
             _ => {
                 if byte.is_ascii_digit() {
-                    CSI_VALUE = CSI_VALUE
-                        .saturating_mul(10)
-                        .saturating_add((byte - b'0') as usize);
-                    CSI_HAS_VALUE = true;
+                    if CSI_HAS_SECOND_VALUE {
+                        CSI_SECOND_VALUE = CSI_SECOND_VALUE
+                            .saturating_mul(10)
+                            .saturating_add((byte - b'0') as usize);
+                    } else {
+                        CSI_VALUE = CSI_VALUE
+                            .saturating_mul(10)
+                            .saturating_add((byte - b'0') as usize);
+                        CSI_HAS_VALUE = true;
+                    }
                     return true;
                 }
-                if byte == b'?' || byte == b';' {
+                if byte == b';' {
+                    CSI_HAS_SECOND_VALUE = true;
+                    CSI_SECOND_VALUE = 0;
+                    return true;
+                }
+                if byte == b'?' {
                     return true;
                 }
 
@@ -296,8 +313,19 @@ pub mod gui {
                         TEXT_COL = TEXT_COL.saturating_sub(value);
                     }
                     b'H' | b'f' => {
-                        TEXT_COL = 0;
-                        TEXT_ROW = 0;
+                        let Some((_, rows)) = terminal_grid() else {
+                            ANSI_STATE = 0;
+                            return true;
+                        };
+                        if CSI_HAS_SECOND_VALUE {
+                            TEXT_ROW = value.saturating_sub(1).min(rows.saturating_sub(1));
+                            TEXT_COL = CSI_SECOND_VALUE
+                                .saturating_sub(1)
+                                .min(cols.saturating_sub(1));
+                        } else {
+                            TEXT_COL = 0;
+                            TEXT_ROW = 0;
+                        }
                     }
                     b'J' => {
                         reset_terminal_screen();
@@ -310,7 +338,9 @@ pub mod gui {
                 }
                 ANSI_STATE = 0;
                 CSI_VALUE = 0;
+                CSI_SECOND_VALUE = 0;
                 CSI_HAS_VALUE = false;
+                CSI_HAS_SECOND_VALUE = false;
                 show_cursor();
                 true
             }
