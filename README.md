@@ -76,11 +76,12 @@ writable nkfs root filesystem disk.
 - `src/services.rs`: kernel-side framebuffer service used by GUI syscalls.
 - `src/mouse.rs`: tiny PS/2 mouse packet decoder.
 - `src/linux_abi.rs`: Linux/POSIX syscall compatibility path for Linux ABI
-  user tasks, including basic file I/O, keyboard-backed stdin, `writev`,
-  `pwrite64`, `openat`, `stat`, `fstat`, `lseek`, `truncate`, `ftruncate`,
-  `brk`, file-backed and anonymous `mmap`, `readlink`, `uname`, `getcwd`,
-  `access`, `fcntl`, `ioctl`, resource-limit queries, UID/GID queries, signal
-  setup stubs, time syscalls, and exit syscalls.
+  user tasks, including Linux-style `argc`/`argv`/`envp`/`auxv` startup, basic
+  file I/O, keyboard-backed stdin, `writev`, `pwrite64`, `openat`, `stat`,
+  `fstat`, `lseek`, `truncate`, `ftruncate`, `brk`, file-backed and anonymous
+  `mmap`, `readlink`, `uname`, `getcwd`, `access`, `fcntl`, `ioctl`,
+  resource-limit queries, UID/GID queries, signal setup stubs, time syscalls,
+  and exit syscalls.
 - `src/font.rs`: small PSF2 font loader used by the framebuffer console.
 - `src/framebuffer.rs`: low-level pixel and rectangle drawing.
 - `src/limine.rs`: Limine framebuffer, HHDM, and kernel address requests.
@@ -250,6 +251,11 @@ Already done:
   `/home/root/hello.asm` into `/home/root/hello` and executes the result.
 - A minimal Linux/POSIX ABI path with enough file, directory, process, memory,
   and terminal syscalls to run useful static userland tools.
+- Linux ABI program startup now builds a Linux-style initial stack with
+  `argc`, up to 16 `argv` entries, inherited `envp` from `execve`, default
+  environment variables for kernel-spawned programs, and auxiliary-vector
+  entries such as `AT_PHDR`, `AT_ENTRY`, `AT_RANDOM`, `AT_EXECFN`, and
+  `AT_PLATFORM`.
 - Minimal `fork`/`execve`/`wait4` support so the shell can launch external
   programs on demand.
 - A larger reusable user process table with dynamic PID allocation, parent PID
@@ -296,7 +302,6 @@ Still useful next:
   descriptor table and dynamically allocated page-table roots.
 - Expand the Linux/POSIX ABI with `select`, signal delivery, richer termios
   behavior, process groups, and job-control semantics.
-- Add proper argv/envp/auxv setup for Linux ABI program startup.
 - Expand the TTY/console subsystem with PTYs, process groups, controlling
   terminals, signals, and job-control semantics so Bash can become the default
   shell again without special cases.

@@ -109,6 +109,9 @@ const USER_BRK_START: u64 = 0x0000_0000_4100_0000;
 const USER_BRK_END: u64 = 0x0000_0000_4140_0000;
 const USER_MMAP_START: u64 = 0x0000_0000_4140_0000;
 const USER_MMAP_END: u64 = 0x0000_0000_41f0_0000;
+const MAX_EXEC_ARGS: usize = 16;
+const MAX_EXEC_ENVS: usize = 16;
+const MAX_EXEC_STRING: usize = 128;
 
 #[derive(Clone, Copy)]
 struct OpenFile {
@@ -395,7 +398,12 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_EXECVE => {
-            frame.rax = execve(frame, frame.rdi as *const u8, frame.rsi as *const u64) as u64;
+            frame.rax = execve(
+                frame,
+                frame.rdi as *const u8,
+                frame.rsi as *const u64,
+                frame.rdx as *const u64,
+            ) as u64;
             true
         }
         SYS_UNAME => {
@@ -900,7 +908,12 @@ fn fork(frame: &scheduler::TrapFrame) -> i64 {
     pid as i64
 }
 
-fn execve(frame: &mut scheduler::TrapFrame, path: *const u8, argv: *const u64) -> i64 {
+fn execve(
+    frame: &mut scheduler::TrapFrame,
+    path: *const u8,
+    argv: *const u64,
+    envp: *const u64,
+) -> i64 {
     let Some(index) = scheduler::current_user_index() else {
         return EINVAL;
     };
@@ -914,17 +927,25 @@ fn execve(frame: &mut scheduler::TrapFrame, path: *const u8, argv: *const u64) -
         return ENOENT;
     };
 
-    let mut arg_storage = [[0u8; 64]; 4];
-    let mut arg_lens = [0usize; 4];
-    let mut arg_count = read_argv(argv, &mut arg_storage, &mut arg_lens);
+    let mut arg_storage = [[0u8; MAX_EXEC_STRING]; MAX_EXEC_ARGS];
+    let mut arg_lens = [0usize; MAX_EXEC_ARGS];
+    let mut arg_count = read_string_array(argv, &mut arg_storage, &mut arg_lens);
     if arg_count == 0 {
         let fallback = path_basename(path, &mut arg_storage[0]);
         arg_lens[0] = fallback;
         arg_count = 1;
     }
-    let mut args: [&[u8]; 4] = [b"", b"", b"", b""];
+    let mut args: [&[u8]; MAX_EXEC_ARGS] = [b""; MAX_EXEC_ARGS];
     for arg_index in 0..arg_count {
         args[arg_index] = &arg_storage[arg_index][..arg_lens[arg_index]];
+    }
+
+    let mut env_storage = [[0u8; MAX_EXEC_STRING]; MAX_EXEC_ENVS];
+    let mut env_lens = [0usize; MAX_EXEC_ENVS];
+    let env_count = read_string_array(envp, &mut env_storage, &mut env_lens);
+    let mut envs: [&[u8]; MAX_EXEC_ENVS] = [b""; MAX_EXEC_ENVS];
+    for env_index in 0..env_count {
+        envs[env_index] = &env_storage[env_index][..env_lens[env_index]];
     }
 
     let native_name = native_exec_name(&exec_path[..exec_len]);
@@ -936,6 +957,11 @@ fn execve(frame: &mut scheduler::TrapFrame, path: *const u8, argv: *const u64) -
             "exec",
             &exec_path[..exec_len],
             &args[..arg_count],
+            if env_count == 0 {
+                None
+            } else {
+                Some(&envs[..env_count])
+            },
             frame,
         )
     };
@@ -2371,16 +2397,26 @@ fn write_uts_field(buffer: *mut u8, offset: usize, value: &[u8]) {
     }
 }
 
-fn read_argv(argv: *const u64, storage: &mut [[u8; 64]; 4], lens: &mut [usize; 4]) -> usize {
-    if argv.is_null() {
+fn read_string_array<const COUNT: usize, const LEN: usize>(
+    values: *const u64,
+    storage: &mut [[u8; LEN]; COUNT],
+    lens: &mut [usize; COUNT],
+) -> usize {
+    if values.is_null() || !user_buffer_readable(values as u64, 8) {
         return 0;
     }
 
     let mut count = 0usize;
     unsafe {
         while count < storage.len() {
-            let ptr = *(argv.add(count)) as *const u8;
+            if !user_buffer_readable(values.add(count) as u64, 8) {
+                break;
+            }
+            let ptr = read_user_u64(values.add(count) as *const u8) as *const u8;
             if ptr.is_null() {
+                break;
+            }
+            if !user_buffer_readable(ptr as u64, 1) {
                 break;
             }
             lens[count] = read_user_cstr(ptr, &mut storage[count]);
@@ -2393,7 +2429,7 @@ fn read_argv(argv: *const u64, storage: &mut [[u8; 64]; 4], lens: &mut [usize; 4
     count
 }
 
-fn path_basename(path: *const u8, output: &mut [u8; 64]) -> usize {
+fn path_basename(path: *const u8, output: &mut [u8]) -> usize {
     if path.is_null() {
         return 0;
     }

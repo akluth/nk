@@ -257,7 +257,8 @@ fn install_user_elf(index: usize, name: &'static str, abi: UserAbi) -> bool {
         if let Some(elf) = load_elf(index, image) {
             let stack_top = if matches!(abi, UserAbi::Linux) {
                 let args: [&[u8]; 4] = [name.as_bytes(), b"--noprofile", b"--norc", b"-i"];
-                linux_stack_top(index, &args, elf).unwrap_or_else(|| memory::user_stack_top(index))
+                linux_stack_top(index, &args, None, path, elf)
+                    .unwrap_or_else(|| memory::user_stack_top(index))
             } else {
                 memory::user_stack_top(index)
             };
@@ -295,6 +296,7 @@ pub fn exec_linux_elf(
     task_name: &'static str,
     path: &[u8],
     argv: &[&[u8]],
+    envp: Option<&[&[u8]]>,
     frame: &mut TrapFrame,
 ) -> bool {
     crate::linux_abi::reset_exec_state(index);
@@ -307,7 +309,7 @@ pub fn exec_linux_elf(
     let Some(elf) = load_elf(index, image) else {
         return false;
     };
-    let Some(stack_top) = linux_stack_top(index, argv, elf) else {
+    let Some(stack_top) = linux_stack_top(index, argv, envp, path, elf) else {
         return false;
     };
 
@@ -328,7 +330,7 @@ pub fn spawn_linux_elf(index: usize, task_name: &'static str, path: &[u8], argv:
     let Some(elf) = load_elf(index, image) else {
         return false;
     };
-    let Some(stack_top) = linux_stack_top(index, argv, elf) else {
+    let Some(stack_top) = linux_stack_top(index, argv, None, path, elf) else {
         return false;
     };
     let Some(root) = (unsafe { (*USER_ADDRESS_SPACE.0.get()).root(index) }) else {
@@ -363,8 +365,15 @@ pub fn exec_native_elf(
     true
 }
 
-fn linux_stack_top(index: usize, argv: &[&[u8]], elf: ElfImage) -> Option<VirtAddr> {
+fn linux_stack_top(
+    index: usize,
+    argv: &[&[u8]],
+    envp: Option<&[&[u8]]>,
+    exec_path: &[u8],
+    elf: ElfImage,
+) -> Option<VirtAddr> {
     const AT_NULL: u64 = 0;
+    const AT_IGNORE: u64 = 1;
     const AT_PHDR: u64 = 3;
     const AT_PHENT: u64 = 4;
     const AT_PHNUM: u64 = 5;
@@ -374,10 +383,14 @@ fn linux_stack_top(index: usize, argv: &[&[u8]], elf: ElfImage) -> Option<VirtAd
     const AT_EUID: u64 = 12;
     const AT_GID: u64 = 13;
     const AT_EGID: u64 = 14;
+    const AT_CLKTCK: u64 = 17;
     const AT_SECURE: u64 = 23;
+    const AT_RANDOM: u64 = 25;
+    const AT_EXECFN: u64 = 31;
+    const AT_PLATFORM: u64 = 15;
 
     let stack_base = memory::user_stack_top(index) - memory::USER_STACK_SIZE as u64;
-    let env = [
+    let default_env = [
         b"TERM=linux".as_slice(),
         b"PATH=/bin".as_slice(),
         b"HOME=/root".as_slice(),
@@ -386,13 +399,14 @@ fn linux_stack_top(index: usize, argv: &[&[u8]], elf: ElfImage) -> Option<VirtAd
         b"HOSTNAME=archiso".as_slice(),
         b"PS1=# ".as_slice(),
     ];
+    let env = envp.unwrap_or(&default_env);
 
     if !memory::clear_user_stack(index) {
         return None;
     }
 
     let mut cursor = memory::USER_STACK_SIZE;
-    let mut argv_addrs = [0u64; 8];
+    let mut argv_addrs = [0u64; 16];
     if argv.len() > argv_addrs.len() {
         return None;
     }
@@ -406,7 +420,10 @@ fn linux_stack_top(index: usize, argv: &[&[u8]], elf: ElfImage) -> Option<VirtAd
         }
     }
 
-    let mut env_addrs = [0u64; 8];
+    let mut env_addrs = [0u64; 16];
+    if env.len() > env_addrs.len() {
+        return None;
+    }
     for (env_index, env_value) in env.iter().enumerate().rev() {
         cursor = align_down(cursor.checked_sub(env_value.len() + 1)?, 8);
         env_addrs[env_index] = stack_base + cursor as u64;
@@ -415,6 +432,23 @@ fn linux_stack_top(index: usize, argv: &[&[u8]], elf: ElfImage) -> Option<VirtAd
         {
             return None;
         }
+    }
+
+    let platform = b"x86_64";
+    cursor = align_down(cursor.checked_sub(platform.len() + 1)?, 8);
+    let platform_addr = stack_base + cursor as u64;
+    if !memory::write_user_stack(index, cursor, platform)
+        || !memory::write_user_stack(index, cursor + platform.len(), &[0])
+    {
+        return None;
+    }
+
+    cursor = align_down(cursor.checked_sub(exec_path.len() + 1)?, 8);
+    let execfn_addr = stack_base + cursor as u64;
+    if !memory::write_user_stack(index, cursor, exec_path)
+        || !memory::write_user_stack(index, cursor + exec_path.len(), &[0])
+    {
+        return None;
     }
 
     cursor = align_down(cursor.checked_sub(16)?, 16);
@@ -430,7 +464,7 @@ fn linux_stack_top(index: usize, argv: &[&[u8]], elf: ElfImage) -> Option<VirtAd
         return None;
     }
 
-    let mut words = [0u64; 64];
+    let mut words = [0u64; 128];
     let mut word_count = 0usize;
     words[word_count] = argv.len() as u64;
     word_count += 1;
@@ -447,6 +481,8 @@ fn linux_stack_top(index: usize, argv: &[&[u8]], elf: ElfImage) -> Option<VirtAd
     words[word_count] = 0;
     word_count += 1;
     let auxv = [
+        AT_IGNORE,
+        0,
         AT_PHDR,
         elf.phdr,
         AT_PHENT,
@@ -467,8 +503,14 @@ fn linux_stack_top(index: usize, argv: &[&[u8]], elf: ElfImage) -> Option<VirtAd
         0,
         AT_SECURE,
         0,
-        25,
+        AT_CLKTCK,
+        100,
+        AT_RANDOM,
         random_addr,
+        AT_EXECFN,
+        execfn_addr,
+        AT_PLATFORM,
+        platform_addr,
         AT_NULL,
         0,
     ];
