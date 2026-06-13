@@ -16,6 +16,7 @@ const SYS_MUNMAP: u64 = 11;
 const SYS_LSEEK: u64 = 8;
 const SYS_RT_SIGACTION: u64 = 13;
 const SYS_RT_SIGPROCMASK: u64 = 14;
+const SYS_RT_SIGRETURN: u64 = 15;
 const SYS_IOCTL: u64 = 16;
 const SYS_PWRITE64: u64 = 18;
 const SYS_WRITEV: u64 = 20;
@@ -195,6 +196,11 @@ static mut STDOUT_BUDGETS: [isize; scheduler::USER_TASKS] = [-1; scheduler::USER
 static mut UNKNOWN_LOGS: u64 = 0;
 static mut SIGNAL_HANDLERS: [[u64; 64]; scheduler::USER_TASKS] =
     [[SIG_DFL; 64]; scheduler::USER_TASKS];
+static mut SIGNAL_RESTORERS: [[u64; 64]; scheduler::USER_TASKS] =
+    [[0; 64]; scheduler::USER_TASKS];
+static mut SIGNAL_FLAGS: [[u64; 64]; scheduler::USER_TASKS] = [[0; 64]; scheduler::USER_TASKS];
+static mut SIGNAL_ACTION_MASKS: [[u64; 64]; scheduler::USER_TASKS] =
+    [[0; 64]; scheduler::USER_TASKS];
 static mut SIGNAL_MASKS: [u64; scheduler::USER_TASKS] = [0; scheduler::USER_TASKS];
 static mut SIGNAL_PENDING: [u64; scheduler::USER_TASKS] = [0; scheduler::USER_TASKS];
 
@@ -238,6 +244,9 @@ pub fn reset_process_state(index: usize) {
         PROGRAM_BREAKS[index] = USER_BRK_START;
         STDOUT_BUDGETS[index] = -1;
         SIGNAL_HANDLERS[index] = [SIG_DFL; 64];
+        SIGNAL_RESTORERS[index] = [0; 64];
+        SIGNAL_FLAGS[index] = [0; 64];
+        SIGNAL_ACTION_MASKS[index] = [0; 64];
         SIGNAL_MASKS[index] = 0;
         SIGNAL_PENDING[index] = 0;
         tty::reset_task(index);
@@ -263,6 +272,9 @@ pub fn reset_exec_state(index: usize) {
         PROGRAM_BREAKS[index] = USER_BRK_START;
         STDOUT_BUDGETS[index] = -1;
         SIGNAL_HANDLERS[index] = [SIG_DFL; 64];
+        SIGNAL_RESTORERS[index] = [0; 64];
+        SIGNAL_FLAGS[index] = [0; 64];
+        SIGNAL_ACTION_MASKS[index] = [0; 64];
         SIGNAL_MASKS[index] = 0;
         SIGNAL_PENDING[index] = 0;
         tty::reset_task(index);
@@ -370,6 +382,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
         SYS_RT_SIGPROCMASK => {
             frame.rax =
                 rt_sigprocmask(frame.rdi, frame.rsi as *const u8, frame.rdx as *mut u8) as u64;
+            true
+        }
+        SYS_RT_SIGRETURN => {
+            frame.rax = rt_sigreturn(frame) as u64;
             true
         }
         SYS_IOCTL => {
@@ -2423,6 +2439,58 @@ fn signal_bit(signal: u8) -> Option<u64> {
     }
 }
 
+const SIGNAL_FRAME_MAGIC: u64 = 0x6e_6b_73_69_67_66_72_6d;
+const SIGNAL_FRAME_WORDS: usize = 24;
+const SIGNAL_FRAME_BYTES: u64 = (SIGNAL_FRAME_WORDS as u64) * 8;
+
+fn trapframe_words(frame: &scheduler::TrapFrame) -> [u64; 20] {
+    [
+        frame.r15,
+        frame.r14,
+        frame.r13,
+        frame.r12,
+        frame.r11,
+        frame.r10,
+        frame.r9,
+        frame.r8,
+        frame.rdi,
+        frame.rsi,
+        frame.rbp,
+        frame.rbx,
+        frame.rdx,
+        frame.rcx,
+        frame.rax,
+        frame.rip,
+        frame.cs,
+        frame.rflags,
+        frame.rsp,
+        frame.ss,
+    ]
+}
+
+fn restore_trapframe(frame: &mut scheduler::TrapFrame, words: &[u64; 20]) {
+    frame.r15 = words[0];
+    frame.r14 = words[1];
+    frame.r13 = words[2];
+    frame.r12 = words[3];
+    frame.r11 = words[4];
+    frame.r10 = words[5];
+    frame.r9 = words[6];
+    frame.r8 = words[7];
+    frame.rdi = words[8];
+    frame.rsi = words[9];
+    frame.rbp = words[10];
+    frame.rbx = words[11];
+    frame.rdx = words[12];
+    frame.rcx = words[13];
+    frame.rax = words[14];
+    frame.rip = words[15];
+    frame.cs = words[16];
+    frame.rflags = words[17];
+    frame.rsp = words[18];
+    frame.ss = words[19];
+}
+
 fn valid_signal(signal: u8) -> bool {
     signal > 0 && signal < 64
 }
@@ -2435,15 +2503,18 @@ fn rt_sigaction(signal: u8, action: *const u8, old_action: *mut u8) -> i64 {
     unsafe {
         if !old_action.is_null() {
             write_user_u64(old_action, SIGNAL_HANDLERS[index][signal as usize]);
-            write_user_u64(old_action.add(8), 0);
-            write_user_u64(old_action.add(16), 0);
-            write_user_u64(old_action.add(24), SIGNAL_MASKS[index]);
+            write_user_u64(old_action.add(8), SIGNAL_FLAGS[index][signal as usize]);
+            write_user_u64(old_action.add(16), SIGNAL_RESTORERS[index][signal as usize]);
+            write_user_u64(old_action.add(24), SIGNAL_ACTION_MASKS[index][signal as usize]);
         }
         if !action.is_null() {
             if !user_buffer_readable(action as u64, 32) {
                 return EFAULT;
             }
             SIGNAL_HANDLERS[index][signal as usize] = read_user_u64(action);
+            SIGNAL_FLAGS[index][signal as usize] = read_user_u64(action.add(8));
+            SIGNAL_RESTORERS[index][signal as usize] = read_user_u64(action.add(16));
+            SIGNAL_ACTION_MASKS[index][signal as usize] = read_user_u64(action.add(24));
         }
     }
     0
@@ -2471,6 +2542,29 @@ fn rt_sigprocmask(how: u64, set: *const u8, old_set: *mut u8) -> i64 {
         }
     }
     0
+}
+
+fn rt_sigreturn(frame: &mut scheduler::TrapFrame) -> i64 {
+    let Some(index) = scheduler::current_user_index() else {
+        return EINVAL;
+    };
+    let base = frame.rsp;
+    if !user_buffer_readable(base, SIGNAL_FRAME_BYTES as usize) {
+        return EFAULT;
+    }
+    unsafe {
+        let ptr = base as *const u8;
+        if read_user_u64(ptr) != SIGNAL_FRAME_MAGIC {
+            return EINVAL;
+        }
+        SIGNAL_MASKS[index] = read_user_u64(ptr.add(8));
+        let mut words = [0u64; 20];
+        for (word_index, word) in words.iter_mut().enumerate() {
+            *word = read_user_u64(ptr.add(32 + word_index * 8));
+        }
+        restore_trapframe(frame, &words);
+        frame.rax as i64
+    }
 }
 
 fn kill(pid: i64, signal: u8) -> i64 {
@@ -2563,6 +2657,22 @@ fn deliver_pending_signal(frame: &mut scheduler::TrapFrame) -> bool {
                 return false;
             }
             if handler != SIG_DFL {
+                let restorer = SIGNAL_RESTORERS[index][signal as usize];
+                if restorer == 0 {
+                    SIGNAL_PENDING[index] |= bit;
+                    return false;
+                }
+                let action_mask = SIGNAL_ACTION_MASKS[index][signal as usize];
+                if setup_signal_handler_frame(
+                    index,
+                    frame,
+                    signal,
+                    handler,
+                    restorer,
+                    bit | action_mask,
+                ) {
+                    return true;
+                }
                 SIGNAL_PENDING[index] |= bit;
                 return false;
             }
@@ -2575,6 +2685,48 @@ fn deliver_pending_signal(frame: &mut scheduler::TrapFrame) -> bool {
         }
     }
     false
+}
+
+fn setup_signal_handler_frame(
+    index: usize,
+    frame: &mut scheduler::TrapFrame,
+    signal: u8,
+    handler: u64,
+    restorer: u64,
+    handler_mask: u64,
+) -> bool {
+    let frame_top = frame.rsp;
+    if frame_top < SIGNAL_FRAME_BYTES + 8 {
+        return false;
+    }
+    let new_rsp = (frame_top - SIGNAL_FRAME_BYTES - 8) & !0xf;
+    let sigframe = new_rsp + 8;
+    if !memory::user_range_mapped(index, new_rsp, (SIGNAL_FRAME_BYTES + 8) as usize) {
+        return false;
+    }
+    unsafe {
+        let return_ptr = new_rsp as *mut u8;
+        write_user_u64(return_ptr, restorer);
+
+        let ptr = sigframe as *mut u8;
+        write_user_u64(ptr, SIGNAL_FRAME_MAGIC);
+        write_user_u64(ptr.add(8), SIGNAL_MASKS[index]);
+        write_user_u64(ptr.add(16), signal as u64);
+        write_user_u64(ptr.add(24), 0);
+        let words = trapframe_words(frame);
+        for (word_index, word) in words.iter().enumerate() {
+            write_user_u64(ptr.add(32 + word_index * 8), *word);
+        }
+        let unblockable = signal_bit(SIGKILL).unwrap_or(0) | signal_bit(SIGSTOP).unwrap_or(0);
+        SIGNAL_MASKS[index] |= handler_mask & !unblockable;
+    }
+
+    frame.rip = handler;
+    frame.rsp = new_rsp;
+    frame.rdi = signal as u64;
+    frame.rsi = 0;
+    frame.rdx = 0;
+    true
 }
 
 fn default_ignores_signal(signal: u8) -> bool {

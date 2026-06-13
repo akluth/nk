@@ -285,6 +285,10 @@ Already done:
   `rt_sigprocmask` masks, pending signal bits, `kill`, `tkill`, `tgkill`,
   process-group signal routing, default termination for fatal signals, and
   `Ctrl-C`/`SIGINT` delivery to the TTY foreground process group.
+- User-space signal-handler delivery for Linux ABI tasks through saved
+  trapframes on the user stack, `sa_restorer` return trampolines, `rt_sigreturn`
+  frame restoration, per-handler `sa_mask`, and automatic temporary signal
+  masking while a handler runs.
 - `/bin/pipecheck`, a small Linux ABI test program that validates a real
   `pipe` + `fork` + `dup2` + `execve` pipeline through Coreutils `echo` and
   `cat`.
@@ -308,8 +312,8 @@ Still useful next:
 
 - Replace the remaining compile-time user process capacity with a growable
   descriptor table and dynamically allocated page-table roots.
-- Expand the Linux/POSIX ABI with `select`, user-space signal-handler frames,
-  richer termios behavior, and job-control semantics.
+- Expand the Linux/POSIX ABI with `select`, richer termios behavior, and
+  job-control semantics.
 - Expand the TTY/console subsystem with PTYs, controlling terminals, signal
   delivery, and full job-control semantics so Bash can become the default shell
   again without special cases.
