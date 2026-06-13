@@ -145,6 +145,7 @@ Build-UserProgram "taskview"
 Build-UserProgram "init"
 Build-UserProgram "nsh"
 Build-UserProgram "nkedit"
+Build-UserProgram "pipecheck"
 Ensure-Coreutils
 Ensure-BashProgram
 Ensure-Nasm
@@ -153,6 +154,7 @@ $GuiElf = Join-Path $Build "user\gui.elf"
 $TaskviewElf = Join-Path $Build "user\taskview.elf"
 $NshElf = Join-Path $Build "user\nsh.elf"
 $NkeditElf = Join-Path $Build "user\nkedit.elf"
+$PipecheckElf = Join-Path $Build "user\pipecheck.elf"
 $InitElf = Join-Path $Build "user\init.elf"
 $BashElf = Join-Path $Build "user\bash.elf"
 $NasmElf = Join-Path $Build "user\nasm.elf"
@@ -168,6 +170,7 @@ $AppFiles = @(
     "$InitElf=/bin/init",
     "$NshElf=/bin/nsh",
     "$NkeditElf=/bin/nkedit",
+    "$PipecheckElf=/bin/pipecheck",
     "$BashElf=/bin/bash",
     "$NasmElf=/bin/nasm",
     "$FontPsf=/etc/font.psf",

@@ -60,6 +60,9 @@ struct UserTask {
     active: bool,
     waiting_stdin: bool,
     stdin_buffer: u64,
+    waiting_pipe_read: bool,
+    pipe_id: u16,
+    pipe_buffer: u64,
     waiting_child: bool,
     wait_pid: i32,
     wait_status: u64,
@@ -105,6 +108,9 @@ impl UserTask {
             active: false,
             waiting_stdin: false,
             stdin_buffer: 0,
+            waiting_pipe_read: false,
+            pipe_id: 0,
+            pipe_buffer: 0,
             waiting_child: false,
             wait_pid: 0,
             wait_status: 0,
@@ -127,6 +133,12 @@ pub struct UserSwitch {
 
 #[derive(Clone, Copy)]
 pub struct StdinWake {
+    pub pml4_phys: u64,
+    pub buffer: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct PipeWake {
     pub pml4_phys: u64,
     pub buffer: u64,
 }
@@ -237,6 +249,9 @@ impl UserScheduler {
             active: true,
             waiting_stdin: false,
             stdin_buffer: 0,
+            waiting_pipe_read: false,
+            pipe_id: 0,
+            pipe_buffer: 0,
             waiting_child: false,
             wait_pid: 0,
             wait_status: 0,
@@ -262,6 +277,9 @@ impl UserScheduler {
         task.active = true;
         task.waiting_stdin = false;
         task.stdin_buffer = 0;
+        task.waiting_pipe_read = false;
+        task.pipe_id = 0;
+        task.pipe_buffer = 0;
         task.waiting_child = false;
         task.wait_pid = 0;
         task.wait_status = 0;
@@ -278,7 +296,11 @@ impl UserScheduler {
                 continue;
             };
             if task.pid == 0
-                || (!task.active && !task.waiting_stdin && !task.waiting_child && !task.zombie)
+                || (!task.active
+                    && !task.waiting_stdin
+                    && !task.waiting_pipe_read
+                    && !task.waiting_child
+                    && !task.zombie)
             {
                 return Some(index);
             }
@@ -347,6 +369,35 @@ impl UserScheduler {
         })
     }
 
+    fn block_current_for_pipe_read(
+        &mut self,
+        frame: &mut TrapFrame,
+        pipe_id: u16,
+        buffer: u64,
+    ) -> Option<UserSwitch> {
+        if !self.is_ready() || self.installed < 2 || frame.cs & 0x3 != 0x3 {
+            return None;
+        }
+
+        let current = self.current;
+        let next = self.next_active_from((current + 1) % self.installed)?;
+        self.task_mut(current)?.frame = *frame;
+        self.save_fs_base(current);
+        let task = self.task_mut(current)?;
+        task.active = false;
+        task.waiting_pipe_read = true;
+        task.pipe_id = pipe_id;
+        task.pipe_buffer = buffer;
+        self.current = next;
+        self.restore_fs_base(self.current);
+        let task = *self.task(self.current)?;
+        *frame = task.frame;
+        Some(UserSwitch {
+            name: task.name,
+            pml4_phys: task.pml4_phys,
+        })
+    }
+
     fn block_current_for_child(
         &mut self,
         frame: &mut TrapFrame,
@@ -397,6 +448,27 @@ impl UserScheduler {
         None
     }
 
+    fn wake_pipe_reader(&mut self, pipe_id: u16, result: i64) -> Option<PipeWake> {
+        if !self.is_ready() {
+            return None;
+        }
+        for index in 0..self.installed {
+            let Some(task) = self.task_mut(index) else {
+                continue;
+            };
+            if task.waiting_pipe_read && task.pipe_id == pipe_id {
+                task.waiting_pipe_read = false;
+                task.active = true;
+                task.frame.rax = result as u64;
+                return Some(PipeWake {
+                    pml4_phys: task.pml4_phys,
+                    buffer: task.pipe_buffer,
+                });
+            }
+        }
+        None
+    }
+
     fn stdin_waiter_index(&self) -> Option<usize> {
         if !self.is_ready() {
             return None;
@@ -432,6 +504,9 @@ impl UserScheduler {
         child_task.active = true;
         child_task.waiting_stdin = false;
         child_task.stdin_buffer = 0;
+        child_task.waiting_pipe_read = false;
+        child_task.pipe_id = 0;
+        child_task.pipe_buffer = 0;
         child_task.waiting_child = false;
         child_task.wait_pid = 0;
         child_task.wait_status = 0;
@@ -470,7 +545,11 @@ impl UserScheduler {
         let task = *self.task(index)?;
         Some(UserTaskSnapshot {
             ticks: task.ticks,
-            active: task.active || task.waiting_stdin || task.waiting_child || task.zombie,
+            active: task.active
+                || task.waiting_stdin
+                || task.waiting_pipe_read
+                || task.waiting_child
+                || task.zombie,
             current: index == self.current,
         })
     }
@@ -537,6 +616,9 @@ impl UserScheduler {
             task.active = false;
             task.waiting_stdin = false;
             task.stdin_buffer = 0;
+            task.waiting_pipe_read = false;
+            task.pipe_id = 0;
+            task.pipe_buffer = 0;
             task.waiting_child = false;
             task.wait_pid = 0;
             task.wait_status = 0;
@@ -658,6 +740,7 @@ impl UserScheduler {
             child_task.zombie = false;
             child_task.active = false;
             child_task.waiting_stdin = false;
+            child_task.waiting_pipe_read = false;
             child_task.waiting_child = false;
             child_task.pid = 0;
             child_task.parent_pid = 0;
@@ -688,7 +771,11 @@ impl UserScheduler {
                 continue;
             }
             let waitable = task.zombie
-                || (!zombie_only && (task.active || task.waiting_stdin || task.waiting_child));
+                || (!zombie_only
+                    && (task.active
+                        || task.waiting_stdin
+                        || task.waiting_pipe_read
+                        || task.waiting_child));
             if waitable {
                 return Some(index);
             }
@@ -705,6 +792,9 @@ impl UserScheduler {
             task.active = true;
             task.waiting_stdin = false;
             task.stdin_buffer = 0;
+            task.waiting_pipe_read = false;
+            task.pipe_id = 0;
+            task.pipe_buffer = 0;
             task.waiting_child = false;
             task.wait_pid = 0;
             task.wait_status = 0;
@@ -732,7 +822,7 @@ impl UserScheduler {
             return false;
         }
         self.task(index).map_or(false, |task| {
-            task.active || task.waiting_stdin || task.waiting_child
+            task.active || task.waiting_stdin || task.waiting_pipe_read || task.waiting_child
         })
     }
 
@@ -747,6 +837,9 @@ impl UserScheduler {
             task.zombie = false;
             task.active = false;
             task.waiting_stdin = false;
+            task.waiting_pipe_read = false;
+            task.pipe_id = 0;
+            task.pipe_buffer = 0;
             task.waiting_child = false;
             task.wait_pid = 0;
             task.pid = 0;
@@ -862,8 +955,20 @@ pub fn block_current_for_stdin(frame: &mut TrapFrame, buffer: u64) -> Option<Use
     unsafe { (*USER_SCHEDULER.0.get()).block_current_for_stdin(frame, buffer) }
 }
 
+pub fn block_current_for_pipe_read(
+    frame: &mut TrapFrame,
+    pipe_id: u16,
+    buffer: u64,
+) -> Option<UserSwitch> {
+    unsafe { (*USER_SCHEDULER.0.get()).block_current_for_pipe_read(frame, pipe_id, buffer) }
+}
+
 pub fn wake_stdin_waiter() -> Option<StdinWake> {
     unsafe { (*USER_SCHEDULER.0.get()).wake_stdin_waiter() }
+}
+
+pub fn wake_pipe_reader(pipe_id: u16, result: i64) -> Option<PipeWake> {
+    unsafe { (*USER_SCHEDULER.0.get()).wake_pipe_reader(pipe_id, result) }
 }
 
 pub fn stdin_waiter_index() -> Option<usize> {

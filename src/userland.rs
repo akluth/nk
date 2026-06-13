@@ -297,7 +297,7 @@ pub fn exec_linux_elf(
     argv: &[&[u8]],
     frame: &mut TrapFrame,
 ) -> bool {
-    crate::linux_abi::reset_process_state(index);
+    crate::linux_abi::reset_exec_state(index);
     let Some(image) = crate::nkfs::read_file(path) else {
         return false;
     };

@@ -21,6 +21,8 @@ const SYS_PWRITE64: u64 = 18;
 const SYS_WRITEV: u64 = 20;
 const SYS_PIPE: u64 = 22;
 const SYS_ACCESS: u64 = 21;
+const SYS_DUP: u64 = 32;
+const SYS_DUP2: u64 = 33;
 const SYS_MADVISE: u64 = 28;
 const SYS_FSYNC: u64 = 74;
 const SYS_FDATASYNC: u64 = 75;
@@ -70,6 +72,7 @@ const SYS_RENAMEAT: u64 = 264;
 const SYS_FACCESSAT: u64 = 269;
 const SYS_SPLICE: u64 = 275;
 const SYS_PIPE2: u64 = 293;
+const SYS_DUP3: u64 = 292;
 const SYS_EXIT_GROUP: u64 = 231;
 const SYS_SET_ROBUST_LIST: u64 = 273;
 const SYS_NEWFSTATAT: u64 = 262;
@@ -113,6 +116,10 @@ struct OpenFile {
     offset: usize,
     is_dir: bool,
     is_tty: bool,
+    is_pipe: bool,
+    pipe_id: usize,
+    pipe_read: bool,
+    pipe_write: bool,
     writable: bool,
     ram_index: usize,
     mode: u32,
@@ -127,6 +134,10 @@ impl OpenFile {
             offset: 0,
             is_dir: false,
             is_tty: false,
+            is_pipe: false,
+            pipe_id: usize::MAX,
+            pipe_read: false,
+            pipe_write: false,
             writable: false,
             ram_index: usize::MAX,
             mode: 0,
@@ -137,15 +148,21 @@ impl OpenFile {
 }
 
 struct GlobalOpenFiles(UnsafeCell<[[OpenFile; MAX_OPEN_FILES]; scheduler::USER_TASKS]>);
+struct GlobalStdFiles(UnsafeCell<[[OpenFile; 3]; scheduler::USER_TASKS]>);
 
 unsafe impl Sync for GlobalOpenFiles {}
+unsafe impl Sync for GlobalStdFiles {}
 
 const FIRST_USER_FD: i32 = 3;
 const MAX_OPEN_FILES: usize = 16;
 const FD_BUFFER_CAP: usize = 256 * 1024;
+const PIPE_COUNT: usize = 16;
+const PIPE_CAP: usize = 8192;
 static OPEN_FILES: GlobalOpenFiles = GlobalOpenFiles(UnsafeCell::new(
     [[OpenFile::empty(); MAX_OPEN_FILES]; scheduler::USER_TASKS],
 ));
+static STD_FILES: GlobalStdFiles =
+    GlobalStdFiles(UnsafeCell::new([[OpenFile::empty(); 3]; scheduler::USER_TASKS]));
 static mut FD_BUFFERS: [[[u8; FD_BUFFER_CAP]; MAX_OPEN_FILES]; scheduler::USER_TASKS] =
     [[[0; FD_BUFFER_CAP]; MAX_OPEN_FILES]; scheduler::USER_TASKS];
 static mut TASK_CWDS: [[u8; 256]; scheduler::USER_TASKS] = [[0; 256]; scheduler::USER_TASKS];
@@ -154,6 +171,37 @@ static mut MMAP_CURSORS: [u64; scheduler::USER_TASKS] = [USER_MMAP_START; schedu
 static mut PROGRAM_BREAKS: [u64; scheduler::USER_TASKS] = [USER_BRK_START; scheduler::USER_TASKS];
 static mut STDOUT_BUDGETS: [isize; scheduler::USER_TASKS] = [-1; scheduler::USER_TASKS];
 static mut UNKNOWN_LOGS: u64 = 0;
+
+#[derive(Clone, Copy)]
+struct Pipe {
+    used: bool,
+    buffer: [u8; PIPE_CAP],
+    read: usize,
+    write: usize,
+    len: usize,
+    readers: u16,
+    writers: u16,
+}
+
+impl Pipe {
+    const fn empty() -> Self {
+        Self {
+            used: false,
+            buffer: [0; PIPE_CAP],
+            read: 0,
+            write: 0,
+            len: 0,
+            readers: 0,
+            writers: 0,
+        }
+    }
+}
+
+struct GlobalPipes(UnsafeCell<[Pipe; PIPE_COUNT]>);
+
+unsafe impl Sync for GlobalPipes {}
+
+static PIPES: GlobalPipes = GlobalPipes(UnsafeCell::new([Pipe::empty(); PIPE_COUNT]));
 
 pub fn reset_process_state(index: usize) {
     unsafe {
@@ -164,9 +212,28 @@ pub fn reset_process_state(index: usize) {
         PROGRAM_BREAKS[index] = USER_BRK_START;
         STDOUT_BUDGETS[index] = -1;
         tty::reset_task(index);
-        for file in &mut (*OPEN_FILES.0.get())[index] {
-            *file = OpenFile::empty();
+        for file in &mut (*STD_FILES.0.get())[index] {
+            close_open_file(file);
         }
+        for file in &mut (*OPEN_FILES.0.get())[index] {
+            close_open_file(file);
+        }
+        if TASK_CWD_LENS[index] == 0 {
+            TASK_CWDS[index][0] = b'/';
+            TASK_CWD_LENS[index] = 1;
+        }
+    }
+}
+
+pub fn reset_exec_state(index: usize) {
+    unsafe {
+        if index >= scheduler::USER_TASKS {
+            return;
+        }
+        MMAP_CURSORS[index] = USER_MMAP_START;
+        PROGRAM_BREAKS[index] = USER_BRK_START;
+        STDOUT_BUDGETS[index] = -1;
+        tty::reset_task(index);
         if TASK_CWD_LENS[index] == 0 {
             TASK_CWDS[index][0] = b'/';
             TASK_CWD_LENS[index] = 1;
@@ -267,7 +334,27 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = writev(frame.rdi as i32, frame.rsi as *const u8, frame.rdx as usize) as u64;
             true
         }
-        SYS_PIPE | SYS_PIPE2 | SYS_SPLICE => {
+        SYS_PIPE => {
+            frame.rax = pipe(frame.rdi as *mut u8, 0) as u64;
+            true
+        }
+        SYS_DUP => {
+            frame.rax = dup(frame.rdi as i32, FIRST_USER_FD) as u64;
+            true
+        }
+        SYS_DUP2 => {
+            frame.rax = dup2(frame.rdi as i32, frame.rsi as i32, 0) as u64;
+            true
+        }
+        SYS_PIPE2 => {
+            frame.rax = pipe(frame.rdi as *mut u8, frame.rsi) as u64;
+            true
+        }
+        SYS_DUP3 => {
+            frame.rax = dup2(frame.rdi as i32, frame.rsi as i32, frame.rdx) as u64;
+            true
+        }
+        SYS_SPLICE => {
             frame.rax = ENOSYS as u64;
             true
         }
@@ -280,7 +367,7 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             true
         }
         SYS_FCNTL => {
-            frame.rax = fcntl(frame.rdi as i32, frame.rsi, frame.rdx) as u64;
+            frame.rax = fcntl(frame.rdi as i32, frame.rsi, frame.rdx as i32) as u64;
             true
         }
         SYS_FSYNC | SYS_FDATASYNC => {
@@ -685,6 +772,114 @@ unsafe fn open_file(fd: i32) -> Option<&'static mut OpenFile> {
     Some(file)
 }
 
+unsafe fn open_file_any(fd: i32) -> Option<&'static mut OpenFile> {
+    if (0..FIRST_USER_FD).contains(&fd) {
+        let task_index = current_task_index();
+        let file = &mut (*STD_FILES.0.get())[task_index][fd as usize];
+        if file.data.is_none() {
+            return None;
+        }
+        return Some(file);
+    }
+    open_file(fd)
+}
+
+unsafe fn file_for_fd(fd: i32) -> Option<OpenFile> {
+    if (0..FIRST_USER_FD).contains(&fd) {
+        let task_index = current_task_index();
+        let file = (*STD_FILES.0.get())[task_index][fd as usize];
+        if file.data.is_some() {
+            return Some(file);
+        }
+        return Some(default_std_file(fd));
+    }
+    open_file(fd).map(|file| *file)
+}
+
+fn default_std_file(fd: i32) -> OpenFile {
+    let mut file = OpenFile::empty();
+    file.data = Some(&[]);
+    file.is_tty = true;
+    file.writable = fd != 0;
+    file.mode = 0o020666;
+    file.path[..8].copy_from_slice(b"/dev/tty");
+    file.path_len = 8;
+    file
+}
+
+unsafe fn install_fd(fd: i32, mut file: OpenFile) -> i64 {
+    if fd < 0 {
+        return EBADF;
+    }
+    if fd < FIRST_USER_FD {
+        let task_index = current_task_index();
+        let slot = &mut (*STD_FILES.0.get())[task_index][fd as usize];
+        close_open_file(slot);
+        inc_file_refs(&file);
+        if file.data.is_none() {
+            file.data = Some(&[]);
+        }
+        *slot = file;
+        return fd as i64;
+    }
+    let index = (fd - FIRST_USER_FD) as usize;
+    if index >= MAX_OPEN_FILES {
+        return EBADF;
+    }
+    let task_index = current_task_index();
+    let slot = &mut (*OPEN_FILES.0.get())[task_index][index];
+    close_open_file(slot);
+    inc_file_refs(&file);
+    if file.data.is_none() {
+        file.data = Some(&[]);
+    }
+    *slot = file;
+    fd as i64
+}
+
+unsafe fn close_open_file(file: &mut OpenFile) {
+    dec_file_refs(file);
+    *file = OpenFile::empty();
+}
+
+fn inc_file_refs(file: &OpenFile) {
+    if file.is_pipe && file.pipe_id < PIPE_COUNT {
+        unsafe {
+            let pipe = &mut (*PIPES.0.get())[file.pipe_id];
+            if pipe.used {
+                if file.pipe_read {
+                    pipe.readers = pipe.readers.saturating_add(1);
+                }
+                if file.pipe_write {
+                    pipe.writers = pipe.writers.saturating_add(1);
+                }
+            }
+        }
+    }
+}
+
+fn dec_file_refs(file: &OpenFile) {
+    if file.is_pipe && file.pipe_id < PIPE_COUNT {
+        unsafe {
+            let pipe = &mut (*PIPES.0.get())[file.pipe_id];
+            if pipe.used {
+                if file.pipe_read && pipe.readers > 0 {
+                    pipe.readers -= 1;
+                }
+                if file.pipe_write && pipe.writers > 0 {
+                    pipe.writers -= 1;
+                    if pipe.writers == 0 && pipe.len == 0 {
+                        let _ = scheduler::wake_pipe_reader(file.pipe_id as u16, 0);
+                    }
+                }
+                if pipe.readers == 0 && pipe.writers == 0 {
+                    *pipe = Pipe::empty();
+                }
+            }
+        }
+    }
+}
+
 fn fork(frame: &scheduler::TrapFrame) -> i64 {
     let Some(parent) = scheduler::current_user_index() else {
         return EINVAL;
@@ -767,34 +962,41 @@ fn read(frame: &mut scheduler::TrapFrame, fd: i32, buffer: *mut u8, len: usize) 
     if buffer.is_null() || len == 0 {
         return Some(0);
     }
-    if fd == 0 {
-        return read_stdin(frame, buffer, len);
-    }
-    if fd < FIRST_USER_FD {
+    if fd < 0 {
         return Some(EBADF);
     }
 
     unsafe {
-        let Some(file) = open_file(fd) else {
-            return Some(EBADF);
-        };
-        if file.is_tty {
-            return read_stdin(frame, buffer, len);
-        }
-        let Some(data) = file.data else {
-            return Some(EBADF);
-        };
-        if file.is_dir {
-            return Some(EINVAL);
-        }
-        if file.offset >= data.len() {
-            return Some(0);
-        }
+        if let Some(file) = open_file_any(fd) {
+            if file.is_tty {
+                return read_stdin(frame, buffer, len);
+            }
+            if file.is_pipe {
+                if !file.pipe_read {
+                    return Some(EBADF);
+                }
+                return read_pipe(frame, file.pipe_id, buffer, len);
+            }
+            let Some(data) = file.data else {
+                return Some(EBADF);
+            };
+            if file.is_dir {
+                return Some(EINVAL);
+            }
+            if file.offset >= data.len() {
+                return Some(0);
+            }
 
-        let count = len.min(data.len() - file.offset);
-        core::ptr::copy_nonoverlapping(data.as_ptr().add(file.offset), buffer, count);
-        file.offset += count;
-        Some(count as i64)
+            let count = len.min(data.len() - file.offset);
+            core::ptr::copy_nonoverlapping(data.as_ptr().add(file.offset), buffer, count);
+            file.offset += count;
+            return Some(count as i64);
+        }
+    }
+    if fd == 0 {
+        read_stdin(frame, buffer, len)
+    } else {
+        Some(EBADF)
     }
 }
 
@@ -809,10 +1011,30 @@ fn write(fd: i32, buffer: *const u8, len: usize) -> i64 {
     if buffer.is_null() {
         return EFAULT;
     }
+    if fd < 0 {
+        return EBADF;
+    }
+    unsafe {
+        if let Some(file) = file_for_fd(fd) {
+            if file.is_pipe {
+                if !file.pipe_write {
+                    return EBADF;
+                }
+                return write_pipe(file.pipe_id, buffer, len);
+            }
+            if file.is_tty {
+                return write_console(fd, buffer, len);
+            }
+        }
+    }
     if fd != 1 && fd != 2 {
         return write_regular_file(fd, buffer, len);
     }
 
+    write_console(fd, buffer, len)
+}
+
+fn write_console(fd: i32, buffer: *const u8, len: usize) -> i64 {
     let len = unsafe {
         let task_index = current_task_index();
         if fd == 1 && STDOUT_BUDGETS[task_index] >= 0 {
@@ -931,15 +1153,232 @@ fn writev(fd: i32, iov: *const u8, count: usize) -> i64 {
     total
 }
 
-fn close(fd: i32) -> i64 {
-    if fd < FIRST_USER_FD {
+fn pipe(fds: *mut u8, flags: u64) -> i64 {
+    if fds.is_null() {
+        return EFAULT;
+    }
+    if flags != 0 {
+        return EINVAL;
+    }
+    unsafe {
+        let Some(pipe_id) = alloc_pipe() else {
+            return EMFILE;
+        };
+        let Some((read_fd, read_index)) = alloc_open_file() else {
+            free_pipe(pipe_id);
+            return EMFILE;
+        };
+        let task_index = current_task_index();
+        (*OPEN_FILES.0.get())[task_index][read_index] = pipe_file(pipe_id, true, false);
+        let Some((write_fd, write_index)) = alloc_open_file() else {
+            close_open_file(&mut (*OPEN_FILES.0.get())[task_index][read_index]);
+            free_pipe(pipe_id);
+            return EMFILE;
+        };
+        (*OPEN_FILES.0.get())[task_index][write_index] = pipe_file(pipe_id, false, true);
+        write_user_i32(fds, read_fd);
+        write_user_i32(fds.add(4), write_fd);
+        0
+    }
+}
+
+fn dup(old_fd: i32, min_fd: i32) -> i64 {
+    unsafe {
+        let Some(file) = file_for_fd(old_fd) else {
+            return EBADF;
+        };
+        if min_fd <= FIRST_USER_FD {
+            let Some((fd, _)) = alloc_open_file() else {
+                return EMFILE;
+            };
+            install_fd(fd, file)
+        } else {
+            for fd in min_fd..FIRST_USER_FD + MAX_OPEN_FILES as i32 {
+                if open_file(fd).is_none() {
+                    return install_fd(fd, file);
+                }
+            }
+            EMFILE
+        }
+    }
+}
+
+fn dup2(old_fd: i32, new_fd: i32, flags: u64) -> i64 {
+    if flags != 0 {
+        return EINVAL;
+    }
+    if new_fd < 0 || new_fd >= FIRST_USER_FD + MAX_OPEN_FILES as i32 {
+        return EBADF;
+    }
+    if old_fd == new_fd {
+        return if unsafe { file_for_fd(old_fd).is_some() } {
+            new_fd as i64
+        } else {
+            EBADF
+        };
+    }
+    unsafe {
+        let Some(file) = file_for_fd(old_fd) else {
+            return EBADF;
+        };
+        install_fd(new_fd, file)
+    }
+}
+
+unsafe fn alloc_pipe() -> Option<usize> {
+    let pipes = &mut *PIPES.0.get();
+    for index in 0..PIPE_COUNT {
+        if !pipes[index].used {
+            pipes[index] = Pipe::empty();
+            pipes[index].used = true;
+            pipes[index].readers = 1;
+            pipes[index].writers = 1;
+            return Some(index);
+        }
+    }
+    None
+}
+
+unsafe fn free_pipe(pipe_id: usize) {
+    if pipe_id < PIPE_COUNT {
+        (*PIPES.0.get())[pipe_id] = Pipe::empty();
+    }
+}
+
+fn pipe_file(pipe_id: usize, read_end: bool, write_end: bool) -> OpenFile {
+    let mut file = OpenFile::empty();
+    file.data = Some(&[]);
+    file.is_pipe = true;
+    file.pipe_id = pipe_id;
+    file.pipe_read = read_end;
+    file.pipe_write = write_end;
+    file.writable = write_end;
+    file.mode = 0o010666;
+    file
+}
+
+fn read_pipe(
+    frame: &mut scheduler::TrapFrame,
+    pipe_id: usize,
+    buffer: *mut u8,
+    len: usize,
+) -> Option<i64> {
+    if pipe_id >= PIPE_COUNT {
+        return Some(EBADF);
+    }
+    unsafe {
+        let pipe = &mut (*PIPES.0.get())[pipe_id];
+        if !pipe.used {
+            return Some(EBADF);
+        }
+        if pipe.len == 0 {
+            if pipe.writers == 0 {
+                return Some(0);
+            }
+            if let Some(task_switch) =
+                scheduler::block_current_for_pipe_read(frame, pipe_id as u16, buffer as u64)
+            {
+                arch::load_cr3(task_switch.pml4_phys);
+                return None;
+            }
+            return Some(EAGAIN);
+        }
+        let mut done = 0usize;
+        while done < len && pipe.len > 0 {
+            *buffer.add(done) = pipe.buffer[pipe.read];
+            pipe.read = (pipe.read + 1) % PIPE_CAP;
+            pipe.len -= 1;
+            done += 1;
+        }
+        Some(done as i64)
+    }
+}
+
+fn write_pipe(pipe_id: usize, buffer: *const u8, len: usize) -> i64 {
+    if pipe_id >= PIPE_COUNT {
         return EBADF;
     }
     unsafe {
+        let pipe = &mut (*PIPES.0.get())[pipe_id];
+        if !pipe.used {
+            return EBADF;
+        }
+        if pipe.readers == 0 {
+            return EPIPE;
+        }
+        if pipe.len == PIPE_CAP {
+            return EAGAIN;
+        }
+        let mut done = 0usize;
+        while done < len && pipe.len < PIPE_CAP {
+            pipe.buffer[pipe.write] = *buffer.add(done);
+            pipe.write = (pipe.write + 1) % PIPE_CAP;
+            pipe.len += 1;
+            done += 1;
+        }
+        wake_pipe_reader_from(pipe_id);
+        done as i64
+    }
+}
+
+fn wake_pipe_reader_from(pipe_id: usize) {
+    if pipe_id >= PIPE_COUNT {
+        return;
+    }
+    unsafe {
+        let pipes = &mut *PIPES.0.get();
+        let pipe = &mut pipes[pipe_id];
+        if !pipe.used || pipe.len == 0 {
+            return;
+        }
+        let Some(wake) = scheduler::wake_pipe_reader(pipe_id as u16, 1) else {
+            return;
+        };
+        let byte = pipe.buffer[pipe.read];
+        pipe.read = (pipe.read + 1) % PIPE_CAP;
+        pipe.len -= 1;
+        let current_pml4 = arch::read_cr3();
+        arch::load_cr3(wake.pml4_phys);
+        *(wake.buffer as *mut u8) = byte;
+        arch::load_cr3(current_pml4);
+    }
+}
+
+fn pipe_readable(pipe_id: usize) -> bool {
+    if pipe_id >= PIPE_COUNT {
+        return false;
+    }
+    unsafe {
+        let pipe = &(*PIPES.0.get())[pipe_id];
+        pipe.used && (pipe.len > 0 || pipe.writers == 0)
+    }
+}
+
+fn pipe_writable(pipe_id: usize) -> bool {
+    if pipe_id >= PIPE_COUNT {
+        return false;
+    }
+    unsafe {
+        let pipe = &(*PIPES.0.get())[pipe_id];
+        pipe.used && pipe.readers > 0 && pipe.len < PIPE_CAP
+    }
+}
+
+fn close(fd: i32) -> i64 {
+    if fd < 0 {
+        return EBADF;
+    }
+    unsafe {
+        if (0..FIRST_USER_FD).contains(&fd) {
+            let task_index = current_task_index();
+            let file = &mut (*STD_FILES.0.get())[task_index][fd as usize];
+            close_open_file(file);
+            return 0;
+        }
         let Some(file) = open_file(fd) else {
             return EBADF;
         };
-        *file = OpenFile::empty();
+        close_open_file(file);
     }
     0
 }
@@ -1014,18 +1453,15 @@ fn ftruncate_fd(fd: i32, len: usize) -> i64 {
     0
 }
 
-fn fcntl(fd: i32, command: u64, _arg: u64) -> i64 {
-    if fd != 0 && fd != 1 && fd != 2 {
-        unsafe {
-            if open_file(fd).is_none() {
-                return EBADF;
-            }
-        }
-    }
+fn fcntl(fd: i32, command: u64, _arg: i32) -> i64 {
     if fd < 0 {
         return EBADF;
     }
+    if unsafe { file_for_fd(fd).is_none() } {
+        return EBADF;
+    }
     match command {
+        0 => dup(fd, _arg.max(FIRST_USER_FD)),
         1 | 2 | 3 => 0,
         _ => 0,
     }
@@ -1097,16 +1533,16 @@ fn mmap(address: u64, len: u64, _prot: u64, flags: u64, fd: i64, offset: u64) ->
 }
 
 fn stat_fd(fd: i32, stat_buf: *mut u8) -> i64 {
-    if fd == 0 || fd == 1 || fd == 2 {
-        return write_fake_stat(stat_buf);
+    if fd < 0 {
+        return EBADF;
     }
-    if fd >= FIRST_USER_FD {
-        unsafe {
-            let Some(file) = open_file(fd) else {
-                return EBADF;
-            };
+    unsafe {
+        if let Some(file) = open_file_any(fd) {
             if file.is_tty {
                 return write_stat(stat_buf, 0o020666, 0);
+            }
+            if file.is_pipe {
+                return write_stat(stat_buf, 0o010666, 0);
             }
             let Some(data) = file.data else {
                 return EBADF;
@@ -1114,7 +1550,11 @@ fn stat_fd(fd: i32, stat_buf: *mut u8) -> i64 {
             return write_stat(stat_buf, file.mode, data.len() as u64);
         }
     }
-    EBADF
+    if fd == 0 || fd == 1 || fd == 2 {
+        write_stat(stat_buf, 0o020666, 0)
+    } else {
+        EBADF
+    }
 }
 
 fn stat_path(path: *const u8, stat_buf: *mut u8) -> i64 {
@@ -1405,13 +1845,15 @@ fn basename_bytes(path: &[u8]) -> &[u8] {
 fn ioctl(fd: i32, request: u64, argp: *mut u8) -> i64 {
     if fd != 0 && fd != 1 && fd != 2 {
         unsafe {
-            let Some(file) = open_file(fd) else {
+            let Some(file) = open_file_any(fd) else {
                 return EBADF;
             };
             if !file.is_tty {
                 return EBADF;
             }
         }
+    } else if unsafe { open_file_any(fd).is_some_and(|file| !file.is_tty) } {
+        return EBADF;
     }
 
     match request {
@@ -1437,18 +1879,39 @@ fn poll(fds: *mut u8, count: usize) -> i64 {
             let events = read_user_i16(base.add(4));
             let mut revents = 0i16;
             if fd == 0 && events & 1 != 0 {
-                if tty::has_input() {
+                if let Some(file) = open_file_any(fd) {
+                    if file.is_pipe && file.pipe_read && pipe_readable(file.pipe_id) {
+                        revents |= 1;
+                    } else if file.is_tty && tty::has_input() {
+                        revents |= 1;
+                    }
+                } else if tty::has_input() {
                     revents |= 1;
                 }
             } else if (fd == 1 || fd == 2) && events & 4 != 0 {
-                revents |= 4;
+                if let Some(file) = open_file_any(fd) {
+                    if file.is_pipe && file.pipe_write && pipe_writable(file.pipe_id) {
+                        revents |= 4;
+                    } else if file.is_tty {
+                        revents |= 4;
+                    }
+                } else {
+                    revents |= 4;
+                }
             } else if fd >= FIRST_USER_FD && events != 0 {
-                if let Some(file) = open_file(fd) {
+                if let Some(file) = open_file_any(fd) {
                     if file.is_tty {
                         if events & 1 != 0 && tty::has_input() {
                             revents |= 1;
                         }
                         if events & 4 != 0 {
+                            revents |= 4;
+                        }
+                    } else if file.is_pipe {
+                        if events & 1 != 0 && file.pipe_read && pipe_readable(file.pipe_id) {
+                            revents |= 1;
+                        }
+                        if events & 4 != 0 && file.pipe_write && pipe_writable(file.pipe_id) {
                             revents |= 4;
                         }
                     } else {
@@ -1850,10 +2313,6 @@ fn log_unknown_syscall(id: u64) {
     }
 }
 
-fn write_fake_stat(stat_buf: *mut u8) -> i64 {
-    write_stat(stat_buf, 0o100444, 0)
-}
-
 fn write_stat(stat_buf: *mut u8, mode_value: u32, size_value: u64) -> i64 {
     if stat_buf.is_null() {
         return EFAULT;
@@ -2041,13 +2500,22 @@ fn copy_process_state(parent: usize, child: usize) {
         STDOUT_BUDGETS[child] = STDOUT_BUDGETS[parent];
 
         let open_files = &mut *OPEN_FILES.0.get();
+        let std_files = &mut *STD_FILES.0.get();
+        std_files[child] = std_files[parent];
         open_files[child] = open_files[parent];
 
         let buffers = &mut *core::ptr::addr_of_mut!(FD_BUFFERS);
         buffers[child] = buffers[parent];
 
+        for fd_index in 0..3 {
+            inc_file_refs(&std_files[child][fd_index]);
+        }
         for fd_index in 0..MAX_OPEN_FILES {
+            inc_file_refs(&open_files[child][fd_index]);
             if let Some(data) = open_files[child][fd_index].data {
+                if open_files[child][fd_index].is_pipe || open_files[child][fd_index].is_tty {
+                    continue;
+                }
                 open_files[child][fd_index].data = Some(core::slice::from_raw_parts(
                     buffers[child][fd_index].as_ptr(),
                     data.len(),
@@ -2110,6 +2578,12 @@ unsafe fn write_user_u16(ptr: *mut u8, value: u16) {
 }
 
 unsafe fn write_user_u32(ptr: *mut u8, value: u32) {
+    for (index, byte) in value.to_le_bytes().iter().enumerate() {
+        *ptr.add(index) = *byte;
+    }
+}
+
+unsafe fn write_user_i32(ptr: *mut u8, value: i32) {
     for (index, byte) in value.to_le_bytes().iter().enumerate() {
         *ptr.add(index) = *byte;
     }

@@ -822,6 +822,10 @@ extern "C" fn rust_syscall_interrupt(frame: *mut scheduler::TrapFrame) {
             }
             return;
         }
+        11 if frame.cs & 0x3 == 0x3 => {
+            frame.rax = 0;
+            return;
+        }
         16 => services::gui::clear(frame.rdi as u32),
         17 => services::gui::rect(
             frame.rdi as usize,

@@ -267,6 +267,13 @@ Already done:
 - A first kernel TTY layer with canonical and raw input queues, blocking
   stdin wakeups, termios raw/canonical switching, `poll` readiness, and a
   synthetic `/dev/tty` device for Linux ABI programs.
+- Linux ABI descriptor duplication and pipes, including `dup`, `dup2`,
+  `dup3`, `fcntl(F_DUPFD)`, `pipe`, `pipe2`, pipe FD inheritance across
+  `fork`, FD preservation across `execve`, and blocking pipe reads with
+  writer wakeups.
+- `/bin/pipecheck`, a small Linux ABI test program that validates a real
+  `pipe` + `fork` + `dup2` + `execve` pipeline through Coreutils `echo` and
+  `cat`.
 - A dynamically loaded Spleen 12x24 PSF2 font at `/etc/font.psf`.
 - A framebuffer terminal with incremental row/cell redraws instead of full
   screen redraw on every character.
@@ -287,8 +294,8 @@ Still useful next:
 
 - Replace the remaining compile-time user process capacity with a growable
   descriptor table and dynamically allocated page-table roots.
-- Expand the Linux/POSIX ABI with pipes, descriptor duplication, `poll`/`select`,
-  signals, termios/TTY handling, process groups, and job-control semantics.
+- Expand the Linux/POSIX ABI with `select`, signal delivery, richer termios
+  behavior, process groups, and job-control semantics.
 - Add proper argv/envp/auxv setup for Linux ABI program startup.
 - Expand the TTY/console subsystem with PTYs, process groups, controlling
   terminals, signals, and job-control semantics so Bash can become the default
