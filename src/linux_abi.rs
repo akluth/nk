@@ -29,8 +29,12 @@ const SYS_FTRUNCATE: u64 = 77;
 const SYS_FCNTL: u64 = 72;
 const SYS_GETCWD: u64 = 79;
 const SYS_CHDIR: u64 = 80;
+const SYS_RENAME: u64 = 82;
+const SYS_MKDIR: u64 = 83;
+const SYS_RMDIR: u64 = 84;
 const SYS_UNLINK: u64 = 87;
 const SYS_GETTIMEOFDAY: u64 = 96;
+const SYS_UMASK: u64 = 95;
 const SYS_GETRLIMIT: u64 = 97;
 const SYS_GETRESUID: u64 = 118;
 const SYS_GETRESGID: u64 = 120;
@@ -60,7 +64,9 @@ const SYS_UNAME: u64 = 63;
 const SYS_EXIT: u64 = 60;
 const SYS_CLOCK_GETTIME: u64 = 228;
 const SYS_OPENAT: u64 = 257;
+const SYS_MKDIRAT: u64 = 258;
 const SYS_UNLINKAT: u64 = 263;
+const SYS_RENAMEAT: u64 = 264;
 const SYS_FACCESSAT: u64 = 269;
 const SYS_SPLICE: u64 = 275;
 const SYS_PIPE2: u64 = 293;
@@ -68,6 +74,7 @@ const SYS_EXIT_GROUP: u64 = 231;
 const SYS_SET_ROBUST_LIST: u64 = 273;
 const SYS_NEWFSTATAT: u64 = 262;
 const SYS_PRLIMIT64: u64 = 302;
+const SYS_RENAMEAT2: u64 = 316;
 const SYS_GETRANDOM: u64 = 318;
 const SYS_STATX: u64 = 332;
 const SYS_RSEQ: u64 = 439;
@@ -79,6 +86,7 @@ const IA32_FS_BASE: u32 = 0xc000_0100;
 const EBADF: i64 = -9;
 const ECHILD: i64 = -10;
 const ENOENT: i64 = -2;
+const EEXIST: i64 = -17;
 const EFAULT: i64 = -14;
 const EINVAL: i64 = -22;
 const EPIPE: i64 = -32;
@@ -91,6 +99,8 @@ const O_WRONLY: u64 = 1;
 const O_RDWR: u64 = 2;
 const O_CREAT: u64 = 0o100;
 const O_TRUNC: u64 = 0o1000;
+
+const AT_REMOVEDIR: u64 = 0x200;
 
 const USER_BRK_START: u64 = 0x0000_0000_4100_0000;
 const USER_BRK_END: u64 = 0x0000_0000_4140_0000;
@@ -353,6 +363,24 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = chdir(frame.rdi as *const u8) as u64;
             true
         }
+        SYS_RENAME => {
+            frame.rax = rename_at(
+                -100,
+                frame.rdi as *const u8,
+                -100,
+                frame.rsi as *const u8,
+                0,
+            ) as u64;
+            true
+        }
+        SYS_MKDIR => {
+            frame.rax = mkdir_at(-100, frame.rdi as *const u8) as u64;
+            true
+        }
+        SYS_RMDIR => {
+            frame.rax = rmdir_at(-100, frame.rdi as *const u8) as u64;
+            true
+        }
         SYS_UNLINK => {
             frame.rax = unlink(frame.rdi as *const u8) as u64;
             true
@@ -363,6 +391,10 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
                 frame.rsi as *mut u8,
                 frame.rdx as usize,
             ) as u64;
+            true
+        }
+        SYS_UMASK => {
+            frame.rax = 0;
             true
         }
         SYS_GETUID | SYS_GETGID | SYS_GETEUID | SYS_GETEGID => {
@@ -426,8 +458,32 @@ pub fn handle_syscall(frame: &mut scheduler::TrapFrame) -> bool {
             frame.rax = open_at(frame.rdi as i32, frame.rsi as *const u8, frame.rdx) as u64;
             true
         }
+        SYS_MKDIRAT => {
+            frame.rax = mkdir_at(frame.rdi as i32, frame.rsi as *const u8) as u64;
+            true
+        }
         SYS_UNLINKAT => {
-            frame.rax = unlink_at(frame.rdi as i32, frame.rsi as *const u8) as u64;
+            frame.rax = unlink_at(frame.rdi as i32, frame.rsi as *const u8, frame.rdx) as u64;
+            true
+        }
+        SYS_RENAMEAT => {
+            frame.rax = rename_at(
+                frame.rdi as i32,
+                frame.rsi as *const u8,
+                frame.rdx as i32,
+                frame.r10 as *const u8,
+                0,
+            ) as u64;
+            true
+        }
+        SYS_RENAMEAT2 => {
+            frame.rax = rename_at(
+                frame.rdi as i32,
+                frame.rsi as *const u8,
+                frame.rdx as i32,
+                frame.r10 as *const u8,
+                frame.r8,
+            ) as u64;
             true
         }
         SYS_NEWFSTATAT => {
@@ -1481,8 +1537,13 @@ fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
             if next > data.len() {
                 break;
             }
+            file.offset = next;
+            if kind == 0 {
+                continue;
+            }
             let record_len = align_up(19 + name_len + 1, 8);
             if written + record_len > count {
+                file.offset = raw_offset;
                 break;
             }
             let out = dirp.add(written);
@@ -1499,7 +1560,6 @@ fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
             for index in 20 + name_len..record_len {
                 *out.add(index) = 0;
             }
-            file.offset = next;
             written += record_len;
         }
         written as i64
@@ -1682,10 +1742,10 @@ fn chdir(path: *const u8) -> i64 {
 }
 
 fn unlink(path: *const u8) -> i64 {
-    unlink_at(-100, path)
+    unlink_at(-100, path, 0)
 }
 
-fn unlink_at(dirfd: i32, path: *const u8) -> i64 {
+fn mkdir_at(dirfd: i32, path: *const u8) -> i64 {
     let mut raw_path = [0u8; 256];
     let raw_len = read_user_cstr(path, &mut raw_path);
     if raw_len == 0 {
@@ -1695,7 +1755,94 @@ fn unlink_at(dirfd: i32, path: *const u8) -> i64 {
     let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
         return ENOENT;
     };
-    if nkfs::remove_ram_file(&resolved[..path_len]) {
+    if nkfs::exists(&resolved[..path_len]) {
+        return EEXIST;
+    }
+    if nkfs::create_dir(&resolved[..path_len]) {
+        0
+    } else {
+        ENOENT
+    }
+}
+
+fn rmdir_at(dirfd: i32, path: *const u8) -> i64 {
+    let mut raw_path = [0u8; 256];
+    let raw_len = read_user_cstr(path, &mut raw_path);
+    if raw_len == 0 {
+        return ENOENT;
+    }
+    let mut resolved = [0u8; 256];
+    let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
+        return ENOENT;
+    };
+    if nkfs::remove_dir(&resolved[..path_len]) {
+        0
+    } else {
+        ENOENT
+    }
+}
+
+fn rename_at(
+    old_dirfd: i32,
+    old_path: *const u8,
+    new_dirfd: i32,
+    new_path: *const u8,
+    flags: u64,
+) -> i64 {
+    if flags != 0 {
+        return EINVAL;
+    }
+    let mut raw_old = [0u8; 256];
+    let mut raw_new = [0u8; 256];
+    let old_len = read_user_cstr(old_path, &mut raw_old);
+    let new_len = read_user_cstr(new_path, &mut raw_new);
+    if old_len == 0 || new_len == 0 {
+        return ENOENT;
+    }
+    let mut resolved_old = [0u8; 256];
+    let mut resolved_new = [0u8; 256];
+    let Some(old_path_len) =
+        normalize_at_path(old_dirfd, &raw_old[..old_len], &mut resolved_old, false)
+    else {
+        return ENOENT;
+    };
+    let Some(new_path_len) =
+        normalize_at_path(new_dirfd, &raw_new[..new_len], &mut resolved_new, false)
+    else {
+        return ENOENT;
+    };
+    if !nkfs::exists(&resolved_old[..old_path_len]) {
+        return ENOENT;
+    }
+    if nkfs::exists(&resolved_new[..new_path_len]) {
+        return EEXIST;
+    }
+    if nkfs::rename_path(
+        &resolved_old[..old_path_len],
+        &resolved_new[..new_path_len],
+    ) {
+        0
+    } else {
+        ENOENT
+    }
+}
+
+fn unlink_at(dirfd: i32, path: *const u8, flags: u64) -> i64 {
+    let mut raw_path = [0u8; 256];
+    let raw_len = read_user_cstr(path, &mut raw_path);
+    if raw_len == 0 {
+        return ENOENT;
+    }
+    let mut resolved = [0u8; 256];
+    let Some(path_len) = normalize_at_path(dirfd, &raw_path[..raw_len], &mut resolved, false) else {
+        return ENOENT;
+    };
+    let removed = if flags & AT_REMOVEDIR != 0 {
+        nkfs::remove_dir(&resolved[..path_len])
+    } else {
+        nkfs::remove_ram_file(&resolved[..path_len])
+    };
+    if removed {
         0
     } else {
         ENOENT

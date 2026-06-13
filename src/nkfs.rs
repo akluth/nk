@@ -178,7 +178,8 @@ pub fn write_dir_to_console(path: &[u8]) -> bool {
             break;
         }
         let name = &data[offset + 8..offset + 8 + name_len];
-        if name != b"." && name != b".." {
+        let kind = read_u16(data, offset + 6).unwrap_or(0);
+        if kind != 0 && name != b"." && name != b".." {
             write_console(name);
             col += name.len();
             if col >= 64 {
@@ -383,6 +384,137 @@ pub fn remove_ram_file(path: &[u8]) -> bool {
     true
 }
 
+pub fn create_dir(path: &[u8]) -> bool {
+    let Some(fs) = mount() else {
+        return false;
+    };
+    let Some(path) = normalized_path_bytes(path) else {
+        return false;
+    };
+    if path == b"/" {
+        return false;
+    }
+    let Some((parent_path, name)) = split_parent_name(path) else {
+        return false;
+    };
+    let Some(parent) = resolve_path(fs, parent_path) else {
+        return false;
+    };
+    if parent.kind != KIND_DIR || find_dir_entry(parent, name).is_some() {
+        return false;
+    }
+
+    let Some((fs, inode_number)) = allocate_inode(fs) else {
+        return false;
+    };
+    let Some((fs, extent_start)) = allocate_blocks(fs, 1) else {
+        return false;
+    };
+
+    let Some(size) = write_empty_dir(extent_start, inode_number, parent.number) else {
+        return false;
+    };
+    let inode = Inode {
+        number: inode_number,
+        kind: KIND_DIR,
+        size,
+        extent_start,
+        extent_blocks: 1,
+    };
+    if !write_inode(fs, inode) || !append_dir_entry(fs, parent, name, inode_number, KIND_DIR) {
+        return false;
+    }
+    clear_caches();
+    true
+}
+
+pub fn remove_dir(path: &[u8]) -> bool {
+    let Some(fs) = mount() else {
+        return false;
+    };
+    let Some(path) = normalized_path_bytes(path) else {
+        return false;
+    };
+    if path == b"/" {
+        return false;
+    }
+    let Some((parent_path, name)) = split_parent_name(path) else {
+        return false;
+    };
+    let Some(parent) = resolve_path(fs, parent_path) else {
+        return false;
+    };
+    let Some(inode_number) = find_dir_entry(parent, name) else {
+        return false;
+    };
+    let Some(inode) = read_inode(fs, inode_number) else {
+        return false;
+    };
+    if inode.kind != KIND_DIR || !dir_is_empty(inode) {
+        return false;
+    }
+    if remove_dir_entry(parent, name, KIND_DIR).is_none() || !release_inode(fs, inode) {
+        return false;
+    }
+    clear_caches();
+    true
+}
+
+pub fn rename_path(old_path: &[u8], new_path: &[u8]) -> bool {
+    let Some(fs) = mount() else {
+        return false;
+    };
+    let Some(old_path) = normalized_path_bytes(old_path) else {
+        return false;
+    };
+    let Some(new_path) = normalized_path_bytes(new_path) else {
+        return false;
+    };
+    if old_path == b"/" || new_path == b"/" || old_path == new_path {
+        return false;
+    }
+    let Some((old_parent_path, old_name)) = split_parent_name(old_path) else {
+        return false;
+    };
+    let Some((new_parent_path, new_name)) = split_parent_name(new_path) else {
+        return false;
+    };
+    let Some(old_parent) = resolve_path(fs, old_parent_path) else {
+        return false;
+    };
+    let Some(new_parent) = resolve_path(fs, new_parent_path) else {
+        return false;
+    };
+    if old_parent.kind != KIND_DIR
+        || new_parent.kind != KIND_DIR
+        || find_dir_entry(new_parent, new_name).is_some()
+    {
+        return false;
+    }
+    let Some(inode_number) = find_dir_entry(old_parent, old_name) else {
+        return false;
+    };
+    let Some(inode) = read_inode(fs, inode_number) else {
+        return false;
+    };
+    if inode.kind != KIND_FILE && inode.kind != KIND_DIR {
+        return false;
+    }
+    if inode.kind == KIND_DIR && path_is_descendant(new_path, old_path) {
+        return false;
+    }
+    if !append_dir_entry(fs, new_parent, new_name, inode_number, inode.kind) {
+        return false;
+    }
+    if remove_dir_entry(old_parent, old_name, inode.kind).is_none() {
+        let _ = remove_dir_entry(new_parent, new_name, inode.kind);
+        return false;
+    }
+    update_ram_paths(old_path, new_path);
+    clear_caches();
+    true
+}
+
 fn mount() -> Option<Superblock> {
     unsafe {
         if let Some(fs) = MOUNT_CACHE {
@@ -480,18 +612,7 @@ fn create_disk_file(fs: Superblock, path: &[u8]) -> Option<(u32, u32)> {
         return None;
     }
 
-    let max_inode = fs.inode_table_blocks * block::SECTOR_SIZE as u32 / INODE_SIZE as u32;
-    if fs.inode_count >= max_inode || fs.inode_count >= MAX_INODES {
-        return None;
-    }
-
-    let mut fs = fs;
-    let inode_number = fs.inode_count + 1;
-    fs.inode_count = inode_number;
-    if !write_mount(fs) {
-        return None;
-    }
-
+    let (fs, inode_number) = allocate_inode(fs)?;
     let (fs, extent_start) = allocate_blocks(fs, 1)?;
     let inode = Inode {
         number: inode_number,
@@ -532,12 +653,6 @@ fn append_dir_entry(fs: Superblock, mut dir: Inode, name: &[u8], inode: u32, kin
         return false;
     }
     let record_len = align_up(8 + name.len(), 4);
-    let next_size = dir.size + record_len;
-    if next_size > dir.extent_blocks as usize * block::SECTOR_SIZE
-        || next_size > block::SECTOR_SIZE * 16
-    {
-        return false;
-    }
     if read_extent(
         dir.extent_start,
         dir.size,
@@ -550,18 +665,37 @@ fn append_dir_entry(fs: Superblock, mut dir: Inode, name: &[u8], inode: u32, kin
     }
     unsafe {
         let buffer = &mut *ptr::addr_of_mut!(DIR_BUFFER);
-        write_u32(buffer, dir.size, inode);
-        write_u16(buffer, dir.size + 4, name.len() as u16);
-        write_u16(buffer, dir.size + 6, kind);
-        buffer[dir.size + 8..dir.size + 8 + name.len()].copy_from_slice(name);
-        for byte in &mut buffer[dir.size + 8 + name.len()..next_size] {
-            *byte = 0;
+        let mut offset = 0usize;
+        while offset + 8 <= dir.size {
+            let name_len = read_u16(buffer, offset + 4).unwrap_or(0) as usize;
+            let entry_kind = read_u16(buffer, offset + 6).unwrap_or(0);
+            let entry_len = align_up(8 + name_len, 4);
+            let next = offset + entry_len;
+            if next > dir.size {
+                return false;
+            }
+            if entry_kind == 0 && entry_len >= record_len {
+                write_dir_record(buffer, offset, entry_len, name, inode, kind);
+                if !write_extent(dir.extent_start, dir.size, &buffer[..dir.size]) {
+                    return false;
+                }
+                clear_caches();
+                return true;
+            }
+            offset = next;
         }
+        let next_size = dir.size + record_len;
+        if next_size > dir.extent_blocks as usize * block::SECTOR_SIZE
+            || next_size > block::SECTOR_SIZE * 16
+        {
+            return false;
+        }
+        write_dir_record(buffer, dir.size, record_len, name, inode, kind);
         if !write_extent(dir.extent_start, next_size, &buffer[..next_size]) {
             return false;
         }
+        dir.size = next_size;
     }
-    dir.size = next_size;
     write_inode(fs, dir)
 }
 
@@ -575,20 +709,19 @@ fn remove_disk_file(path: &[u8]) -> bool {
     let Some(parent) = resolve_path(fs, parent_path) else {
         return false;
     };
-    let Some(inode_number) = remove_dir_entry(parent, name) else {
+    let Some(inode_number) = remove_dir_entry(parent, name, KIND_FILE) else {
         return false;
     };
-    let inode = Inode {
-        number: inode_number,
-        kind: 0,
-        size: 0,
-        extent_start: 0,
-        extent_blocks: 0,
+    let Some(inode) = read_inode(fs, inode_number) else {
+        return false;
     };
-    write_inode(fs, inode)
+    if inode.kind != KIND_FILE {
+        return false;
+    }
+    release_inode(fs, inode)
 }
 
-fn remove_dir_entry(dir: Inode, name: &[u8]) -> Option<u32> {
+fn remove_dir_entry(dir: Inode, name: &[u8], expected_kind: u16) -> Option<u32> {
     if dir.kind != KIND_DIR || dir.size > block::SECTOR_SIZE * 16 {
         return None;
     }
@@ -609,7 +742,8 @@ fn remove_dir_entry(dir: Inode, name: &[u8]) -> Option<u32> {
             if next > dir.size {
                 return None;
             }
-            if kind == KIND_FILE && buffer.get(offset + 8..offset + 8 + name_len) == Some(name) {
+            if kind == expected_kind && buffer.get(offset + 8..offset + 8 + name_len) == Some(name)
+            {
                 write_u16(buffer, offset + 6, 0);
                 if write_extent(dir.extent_start, dir.size, &buffer[..dir.size]) {
                     return Some(inode);
@@ -620,6 +754,156 @@ fn remove_dir_entry(dir: Inode, name: &[u8]) -> Option<u32> {
         }
     }
     None
+}
+
+fn allocate_inode(mut fs: Superblock) -> Option<(Superblock, u32)> {
+    for inode_number in 1..=fs.inode_count {
+        let Some(inode) = read_inode(fs, inode_number) else {
+            continue;
+        };
+        if inode.kind == 0 {
+            return Some((fs, inode_number));
+        }
+    }
+
+    let max_inode = fs.inode_table_blocks * block::SECTOR_SIZE as u32 / INODE_SIZE as u32;
+    if fs.inode_count >= max_inode || fs.inode_count >= MAX_INODES {
+        return None;
+    }
+    fs.inode_count += 1;
+    if write_mount(fs) {
+        Some((fs, fs.inode_count))
+    } else {
+        None
+    }
+}
+
+fn release_inode(fs: Superblock, inode: Inode) -> bool {
+    write_inode(
+        fs,
+        Inode {
+            number: inode.number,
+            kind: 0,
+            size: 0,
+            extent_start: inode.extent_start,
+            extent_blocks: inode.extent_blocks,
+        },
+    )
+}
+
+fn write_empty_dir(extent_start: u32, self_inode: u32, parent_inode: u32) -> Option<usize> {
+    let mut data = [0u8; block::SECTOR_SIZE];
+    let mut offset = 0usize;
+    offset += write_dir_record(&mut data, offset, align_up(9, 4), b".", self_inode, KIND_DIR);
+    offset += write_dir_record(
+        &mut data,
+        offset,
+        align_up(10, 4),
+        b"..",
+        parent_inode,
+        KIND_DIR,
+    );
+    if write_extent(extent_start, offset, &data[..offset]) {
+        Some(offset)
+    } else {
+        None
+    }
+}
+
+fn write_dir_record(
+    buffer: &mut [u8],
+    offset: usize,
+    record_len: usize,
+    name: &[u8],
+    inode: u32,
+    kind: u16,
+) -> usize {
+    write_u32(buffer, offset, inode);
+    write_u16(buffer, offset + 4, name.len() as u16);
+    write_u16(buffer, offset + 6, kind);
+    buffer[offset + 8..offset + 8 + name.len()].copy_from_slice(name);
+    for byte in &mut buffer[offset + 8 + name.len()..offset + record_len] {
+        *byte = 0;
+    }
+    record_len
+}
+
+fn dir_is_empty(dir: Inode) -> bool {
+    if dir.kind != KIND_DIR || dir.size > block::SECTOR_SIZE * 16 {
+        return false;
+    }
+    if read_extent(
+        dir.extent_start,
+        dir.size,
+        ptr::addr_of_mut!(DIR_BUFFER).cast(),
+        block::SECTOR_SIZE * 16,
+    )
+    .is_none()
+    {
+        return false;
+    }
+    unsafe {
+        let buffer = &*ptr::addr_of!(DIR_BUFFER);
+        let mut offset = 0usize;
+        while offset + 8 <= dir.size {
+            let name_len = read_u16(buffer, offset + 4).unwrap_or(0) as usize;
+            let kind = read_u16(buffer, offset + 6).unwrap_or(0);
+            let next = align_up(offset + 8 + name_len, 4);
+            if next > dir.size {
+                return false;
+            }
+            let name = buffer.get(offset + 8..offset + 8 + name_len).unwrap_or(b"");
+            if kind != 0 && name != b"." && name != b".." {
+                return false;
+            }
+            offset = next;
+        }
+    }
+    true
+}
+
+fn path_is_descendant(path: &[u8], parent: &[u8]) -> bool {
+    path.len() > parent.len()
+        && path.starts_with(parent)
+        && (parent == b"/" || path.get(parent.len()) == Some(&b'/'))
+}
+
+fn update_ram_paths(old_path: &[u8], new_path: &[u8]) {
+    unsafe {
+        let files = &mut *RAM_FILES.0.get();
+        for file in files.iter_mut() {
+            if !file.used {
+                continue;
+            }
+            if file.path_len == old_path.len() && &file.path[..file.path_len] == old_path {
+                if new_path.len() <= file.path.len() {
+                    file.path[..new_path.len()].copy_from_slice(new_path);
+                    file.path_len = new_path.len();
+                }
+            } else if file.path_len > old_path.len()
+                && file.path.starts_with(old_path)
+                && file.path.get(old_path.len()) == Some(&b'/')
+            {
+                let suffix_len = file.path_len - old_path.len();
+                if new_path.len() + suffix_len <= file.path.len() {
+                    let mut next = [0u8; 256];
+                    next[..new_path.len()].copy_from_slice(new_path);
+                    next[new_path.len()..new_path.len() + suffix_len]
+                        .copy_from_slice(&file.path[old_path.len()..file.path_len]);
+                    file.path[..new_path.len() + suffix_len]
+                        .copy_from_slice(&next[..new_path.len() + suffix_len]);
+                    file.path_len = new_path.len() + suffix_len;
+                }
+            }
+        }
+    }
+}
+
+fn clear_caches() {
+    unsafe {
+        FILE_CACHE_INODE = 0;
+        SMALL_FILE_CACHE_INODE = 0;
+    }
 }
 
 fn flush_writable_file(index: usize) -> bool {
@@ -727,7 +1011,8 @@ unsafe fn find_dir_name_in_buffer(size: usize, name: &[u8]) -> bool {
         if next > size {
             break;
         }
-        if buffer.get(offset + 8..offset + 8 + name_len) == Some(name) {
+        let kind = read_u16(buffer, offset + 6).unwrap_or(0);
+        if kind != 0 && buffer.get(offset + 8..offset + 8 + name_len) == Some(name) {
             return true;
         }
         offset = next;
@@ -929,6 +1214,35 @@ fn write_extent(start_block: u32, size: usize, data: &[u8]) -> bool {
 fn allocate_blocks(mut fs: Superblock, blocks: u32) -> Option<(Superblock, u32)> {
     if blocks == 0 {
         return Some((fs, 0));
+    }
+    for inode_number in 1..=fs.inode_count {
+        let Some(inode) = read_inode(fs, inode_number) else {
+            continue;
+        };
+        if inode.kind != 0
+            || inode.extent_start < fs.data_start
+            || inode.extent_blocks < blocks
+            || inode.extent_blocks == 0
+        {
+            continue;
+        }
+        let start = inode.extent_start;
+        let remaining = inode.extent_blocks - blocks;
+        let free_inode = Inode {
+            number: inode.number,
+            kind: 0,
+            size: 0,
+            extent_start: if remaining == 0 {
+                0
+            } else {
+                inode.extent_start + blocks
+            },
+            extent_blocks: remaining,
+        };
+        if !write_inode(fs, free_inode) {
+            return None;
+        }
+        return Some((fs, start));
     }
     let start = fs.next_free_block;
     let next = start.checked_add(blocks)?;

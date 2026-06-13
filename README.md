@@ -237,6 +237,10 @@ Already done:
   `write`, `writev`, `pwrite64`, `truncate`, `ftruncate`, `unlink`,
   `unlinkat`, directory listing integration, file-backed `mmap`, on-disk inode
   updates, superblock free-block tracking, and Virtio block writes.
+- nkfs directory mutation through `mkdir`, `mkdirat`, `rmdir`,
+  `unlinkat(AT_REMOVEDIR)`, `rename`, `renameat`, and `renameat2`, including
+  deleted directory-record filtering and reuse of deleted directory slots,
+  inodes, and file extents.
 - ELF loading from the nkfs root disk for native no_std programs and static
   Linux ABI programs.
 - Optional separate GUI and task viewer binaries loaded from `/bin`; they are
@@ -285,8 +289,8 @@ Still useful next:
 - Add proper argv/envp/auxv setup for Linux ABI program startup.
 - Move from the current framebuffer console path toward a proper TTY/console
   subsystem so Bash can become the default shell again without special cases.
-- Add full directory mutation (`mkdir`, `rmdir`, `rename`), free-space reuse,
-  and evolve nkfs toward a journaled or copy-on-write root filesystem.
+- Evolve nkfs toward a journaled or copy-on-write root filesystem with crash
+  recovery, fsck tooling, and stronger consistency guarantees.
 - Complete Virtio input drivers beyond discovery and queue setup.
 - Give GUI applications private window buffers and route them through a real
   compositor/window manager instead of shared framebuffer drawing.
